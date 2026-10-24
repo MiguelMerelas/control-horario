@@ -1,5 +1,5 @@
 // Guarda la app en el móvil para que funcione sin cobertura.
-const VERSION = 'control-horario-v1.0.0';
+const VERSION = 'control-horario-v1.1.0';
 const ARCHIVOS = [
   './',
   './index.html',

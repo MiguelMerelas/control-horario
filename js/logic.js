@@ -250,6 +250,37 @@ export function avisosDia(tramos, segs, { laborable, verano }) {
   return out;
 }
 
+/** Huecos sin fichar entre el primer y el último tramo del día: [{ini, fin}] */
+export function huecos(tramos) {
+  const ts = tramos.slice().sort((a, b) => a.ini - b.ini);
+  const out = [];
+  let finMax = null;
+  for (const t of ts) {
+    if (finMax != null && t.ini > finMax) out.push({ ini: finMax, fin: t.ini });
+    const f = t.fin == null ? Infinity : t.fin;
+    finMax = finMax == null ? f : Math.max(finMax, f);
+  }
+  return out;
+}
+
+/** Tramos que se pisan entre sí: Map(idTramo → [tramos con los que se solapa]) */
+export function solapes(tramos, ahora = null) {
+  const m = new Map();
+  const finDe = (t) => t.fin ?? ahora ?? Infinity;
+  for (let i = 0; i < tramos.length; i++) {
+    for (let j = i + 1; j < tramos.length; j++) {
+      const a = tramos[i], b = tramos[j];
+      if (a.ini < finDe(b) && b.ini < finDe(a)) {
+        if (!m.has(a.id)) m.set(a.id, []);
+        if (!m.has(b.id)) m.set(b.id, []);
+        m.get(a.id).push(b);
+        m.get(b.id).push(a);
+      }
+    }
+  }
+  return m;
+}
+
 // ---------- Manipulación de tramos ----------
 
 /** Corta el tramo t para que [a,b] tenga el tipo indicado. Devuelve los trozos. */

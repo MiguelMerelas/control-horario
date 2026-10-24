@@ -100,30 +100,66 @@ main.content { padding: 0 16px; display: flex; flex-direction: column; gap: 12px
 .hero .btn { border-color: var(--hero-line); background: transparent; color: var(--hero-ink); }
 .hero .btn.primary { background: var(--hero-ink); color: var(--hero); border-color: var(--hero-ink); min-height: 54px; font-size: 16px; }
 
-/* Chips de tipo de hora */
-.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border: none; color: var(--c, var(--muted)); background: color-mix(in srgb, var(--c, #888) 14%, var(--card)); white-space: nowrap; }
+/* Chips y colores por tipo de hora */
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; border: none; color: #fff; background: var(--c, #6B7280); white-space: nowrap; }
 button.chip { min-height: 32px; font-size: 13px; padding: 4px 10px; }
 button.chip svg { width: 14px; height: 14px; }
-.hero .chip { background: color-mix(in srgb, var(--c) 18%, #fff); }
 .t-ordinaria { --c: #1D5FB8; }
-.t-desplazamiento { --c: #3F4650; }
-.t-prolongacion { --c: #9A4605; }
-.t-extra { --c: #A3195B; }
-.t-comida { --c: #5B636B; }
-.t-libranza_prol { --c: #1E7A4C; }
-.t-libranza_extra { --c: #0F766E; }
-.t-vacaciones { --c: #6D28D9; }
-.t-enfermedad { --c: #B42318; }
-.t-info { --c: #155E75; }
-.t-preventa { --c: #7A5C00; }
-@media (prefers-color-scheme: dark) {
-  .t-ordinaria { --c: #8DB8F2; } .t-desplazamiento { --c: #B8C0C9; } .t-prolongacion { --c: #F2B26B; }
-  .t-extra { --c: #F08AB8; } .t-comida { --c: #A2A9B0; } .t-libranza_prol { --c: #6FD3A0; }
-  .t-libranza_extra { --c: #5ED3C6; } .t-vacaciones { --c: #B9A2F5; } .t-enfermedad { --c: #F59A90; }
-  .t-info { --c: #7CCDE3; } .t-preventa { --c: #E3C766; }
-  .hero .chip { background: color-mix(in srgb, var(--c) 30%, #fff); color: #16191D; }
-}
+.t-desplazamiento { --c: #0F766E; }
+.t-prolongacion { --c: #C2410C; }
+.t-extra { --c: #B91C1C; }
+.t-comida { --c: #6B7280; }
+.t-libranza_prol { --c: #15803D; }
+.t-libranza_extra { --c: #9D174D; }
+.t-vacaciones { --c: #7C3AED; }
+.t-enfermedad { --c: #854D0E; }
+.t-info { --c: #4D7C0F; }
+.t-preventa { --c: #334155; }
 .txt-t { color: var(--c); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  .txt-t { color: color-mix(in srgb, var(--c) 50%, #fff); }
+}
+/* Fila coloreada según el tipo: franja a la izquierda y fondo suave */
+.tint { background: color-mix(in srgb, var(--c) 9%, var(--card)); box-shadow: inset 5px 0 0 var(--c); }
+@media (prefers-color-scheme: dark) { .tint { background: color-mix(in srgb, var(--c) 16%, var(--card)); } }
+.row.tint, .seg.tint { padding-left: 16px; }
+/* Solapes y huecos */
+.solapa { outline: 2px solid var(--danger); outline-offset: -2px; }
+.solapa-msg { display: flex; align-items: center; gap: 6px; color: var(--danger); font-weight: 700; font-size: 13px; }
+.solapa-msg svg, .solapa-ic svg { width: 16px; height: 16px; flex: none; }
+.solapa-ic { color: var(--danger); display: inline-flex; margin-left: 4px; vertical-align: middle; }
+.hueco { display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line-soft); font-size: 13px; color: var(--ink);
+  background: repeating-linear-gradient(-45deg, var(--warn-bg), var(--warn-bg) 8px, var(--card) 8px, var(--card) 16px); }
+.hueco .mono { font-size: 13px; font-weight: 600; }
+.hueco .grow { flex: 1; min-width: 0; font-weight: 600; }
+.hueco .btn { min-height: 36px; padding: 0 10px; font-size: 13px; background: var(--card); }
+.sinnum { display: inline-block; background: var(--warn-bg); color: var(--ink); border: 1px solid var(--warn-line); border-radius: 6px; padding: 0 6px; font-size: 11px; font-weight: 700; letter-spacing: .02em; vertical-align: 1px; }
+
+/* Resumen: una tarjeta por día */
+.daycard { gap: 0; }
+.dayband { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--ink); color: var(--card); text-decoration: none; }
+.dayband b { font-size: 16px; display: block; }
+.dayband .dsub { display: block; font-size: 12px; opacity: .8; margin-top: 2px; }
+.dayband .dtot { font-size: 18px; font-weight: 700; }
+.dayband .grow { flex: 1; min-width: 0; }
+.dayband .sinnum { color: #16191D; }
+.dayband .btn { border-color: var(--card); color: var(--card); background: transparent; }
+.dayband.tipoband { background: var(--c); color: #fff; }
+.dayband.vacio { background: var(--soft); color: var(--muted); padding: 8px 14px; }
+.dayband.vacio b { font-size: 14px; color: var(--ink); }
+.rrow { display: grid; grid-template-columns: 92px minmax(0, 1fr) 40px 44px; gap: 2px 8px; align-items: center; padding: 8px 12px 8px 14px; border-bottom: 1px solid var(--line-soft); color: inherit; text-decoration: none; font-size: 13px; }
+.rrow.sin-acum { grid-template-columns: 92px minmax(0, 1fr) 44px; }
+.rrow .r { text-align: right; }
+.rrow .acum { font-weight: 700; }
+.rrow .acum.muted { font-weight: 400; }
+.rrow .sub { grid-column: 2 / -1; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.rrow.tint { padding-left: 16px; }
+.rhead { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding-top: 6px; padding-bottom: 6px; background: var(--soft); }
+.hueco-r { background: repeating-linear-gradient(-45deg, var(--warn-bg), var(--warn-bg) 8px, var(--card) 8px, var(--card) 16px); font-weight: 600; }
+.subband { padding: 8px 14px; font-size: 13px; font-weight: 700; background: var(--soft); border-bottom: 1px solid var(--line-soft); }
+.gblock { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px 12px; border-top: 2px solid var(--line); color: inherit; text-decoration: none; }
+.gblock .gav { font-size: 12px; color: var(--muted); }
+.pill-s { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px; border-radius: 8px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; }
 
 /* Contadores */
 .meter { display: flex; flex-direction: column; gap: 6px; }
@@ -234,4 +270,7 @@ nav.tabs .inner { max-width: 560px; }
   #print th { background: #eee; }
   #print .num { text-align: right; white-space: nowrap; }
   #print tr { break-inside: avoid; }
+  #print tr.nuevo-dia td { border-top: 2pt solid #000; }
+  #print .pt { font-weight: 700; color: var(--c); }
+  #print { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

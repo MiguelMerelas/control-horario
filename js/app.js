@@ -2,7 +2,7 @@ import * as L from './logic.js';
 import * as DB from './db.js';
 import { zipBytes, xlsxBytes } from './export.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -161,12 +161,70 @@ const obraPorId = (id) => S.obras.find((o) => o.id === id);
 function infoAviso(id) {
   const a = avisoPorId(id);
   if (!a) return null;
-  return { num: a.numero, obra: obraPorId(a.obraId)?.nombre || '' };
+  const obra = obraPorId(a.obraId)?.nombre || '';
+  const desc = a.descripcion || '';
+  return { num: a.numero || '', desc, obra, texto: [desc, obra].filter(Boolean).join(' · ') };
 }
+const SIN_NUM = '<span class="sinnum">Sin nº</span>';
 function avisoHTML(id, vacio = 'Sin aviso') {
   const i = infoAviso(id);
   if (!i) return `<span class="muted">${vacio}</span>`;
-  return `<span class="mono">${esc(i.num)}</span>${i.obra ? ' · ' + esc(i.obra) : ''}`;
+  return `${i.num ? `<span class="mono">${esc(i.num)}</span>` : SIN_NUM}${i.texto ? ' · ' + esc(i.texto) : ''}`;
+}
+/** Avisos con horas o gastos que todavía no tienen número. */
+function avisosSinNumero() {
+  const usados = new Set([...S.tramos.map((t) => t.avisoId), ...S.gastos.map((g) => g.avisoId)]);
+  return S.avisos.filter((a) => !a.numero && !a.archivado && usados.has(a.id));
+}
+function unirAvisos(desde, hacia) {
+  for (const t of S.tramos) if (t.avisoId === desde) t.avisoId = hacia;
+  for (const g of S.gastos) if (g.avisoId === desde) g.avisoId = hacia;
+  for (const k of Object.keys(S.dietas)) {
+    if (k.slice(11) !== desde) continue;
+    const k2 = `${k.slice(0, 10)}|${hacia}`;
+    const a = S.dietas[k], b = S.dietas[k2] || {};
+    S.dietas[k2] = Object.fromEntries(L.DIETAS.map((d) => [d.id, !!(a[d.id] || b[d.id])]));
+    delete S.dietas[k];
+  }
+  for (const d of Object.values(S.dias)) {
+    if (d.avisosGasto) d.avisosGasto = [...new Set(d.avisosGasto.map((x) => (x === desde ? hacia : x)))];
+  }
+  delete S.ajustes.usoAvisos[desde];
+  S.avisos = S.avisos.filter((a) => a.id !== desde);
+  S.tramos = L.fusionar(S.tramos);
+}
+
+// Campos comunes para crear o modificar un aviso
+function camposAviso({ num = '', desc = '', obraId = '' } = {}) {
+  const obras = S.obras.filter((o) => !o.archivada || o.id === obraId);
+  return `<label class="field">Número de aviso<input class="mono" data-s="num" value="${esc(num)}" placeholder="460945671-1" autocomplete="off" autocapitalize="off"><span class="help">Si aún no lo tienes, déjalo vacío y pon una descripción. Lo completas cuando lo tengas.</span></label>
+    <label class="field">Descripción<input data-s="desc" value="${esc(desc)}" placeholder="Ej.: avería compresor línea 2" autocomplete="off"></label>
+    <label class="field">Obra<select data-s="obra">
+      <option value="">— Sin obra (la pongo luego) —</option>
+      ${obras.map((o) => `<option value="${o.id}" ${o.id === obraId ? 'selected' : ''}>${esc(o.nombre)}</option>`).join('')}
+      <option value="__nueva">+ Obra nueva…</option>
+    </select></label>
+    <label class="field hidden" data-s="obraWrap">Obra nueva (código y descripción)<input data-s="obraNueva" placeholder="31PO-4156 Quesería Manolito" autocomplete="off"></label>`;
+}
+function enlazarCamposAviso(panel) {
+  const q = (s) => panel.querySelector(`[data-s="${s}"]`);
+  q('obra').addEventListener('change', (e) => q('obraWrap').classList.toggle('hidden', e.target.value !== '__nueva'));
+}
+/** Lee y valida los campos. Devuelve {num, desc, obraId} o {error}. Crea la obra nueva si hace falta. */
+function leerCamposAviso(panel) {
+  const q = (s) => panel.querySelector(`[data-s="${s}"]`);
+  const num = q('num').value.trim().replace(/[\s./_]+/g, '-');
+  const desc = q('desc').value.trim();
+  if (!num && !desc) return { error: 'Pon el número de aviso o, si aún no lo tienes, una descripción.' };
+  let obraId = q('obra').value || null;
+  if (obraId === '__nueva') {
+    const nombre = q('obraNueva').value.trim();
+    if (!nombre) return { error: 'Escribe la obra nueva (código y descripción).' };
+    const ya = S.obras.find((o) => o.nombre.toLowerCase() === nombre.toLowerCase());
+    if (ya) obraId = ya.id;
+    else { obraId = uid(); S.obras.push({ id: obraId, nombre, archivada: false }); }
+  }
+  return { num, desc, obraId };
 }
 const usar = (id) => { if (id) S.ajustes.usoAvisos[id] = Date.now(); };
 function ultimoAviso() {
@@ -245,37 +303,38 @@ function pedirValor(titulo, { valor = '', ayuda = '', mono = false, extra = null
   });
 }
 
+function filaAviso(a, actual) {
+  const o = obraPorId(a.obraId);
+  const texto = [a.descripcion, o?.nombre].filter(Boolean).join(' · ') || 'Sin obra';
+  return `<button data-s="pick" data-id="${a.id}"><span class="num">${a.numero ? esc(a.numero) : SIN_NUM}${a.id === actual ? ' ✓' : ''}</span><span class="ob">${esc(texto)}</span></button>`;
+}
+
 function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actual = null, soloNuevo = false } = {}) {
   return new Promise((resolve) => {
     let confirmarFormato = false;
     const lista = (q) => {
       q = (q || '').trim().toLowerCase();
       const avs = S.avisos.filter((a) => !a.archivado)
-        .map((a) => ({ a, o: obraPorId(a.obraId) }))
-        .filter(({ a, o }) => !q || a.numero.toLowerCase().includes(q) || (o?.nombre || '').toLowerCase().includes(q))
-        .sort((x, y) => (S.ajustes.usoAvisos[y.a.id] || 0) - (S.ajustes.usoAvisos[x.a.id] || 0));
+        .filter((a) => !q || [a.numero, a.descripcion, obraPorId(a.obraId)?.nombre].some((x) => (x || '').toLowerCase().includes(q)))
+        .sort((x, y) => (S.ajustes.usoAvisos[y.id] || 0) - (S.ajustes.usoAvisos[x.id] || 0));
       if (!avs.length) return `<div class="empty">${S.avisos.length ? 'Ningún aviso coincide.' : 'Aún no tienes avisos. Crea el primero aquí abajo.'}</div>`;
-      return avs.map(({ a, o }) => `<button data-s="pick" data-id="${a.id}"><span class="num">${esc(a.numero)}${a.id === actual ? ' ✓' : ''}</span><span class="ob">${esc(o?.nombre || 'Sin obra')}</span></button>`).join('');
+      return avs.map((a) => filaAviso(a, actual)).join('');
     };
-    const obras = S.obras.filter((o) => !o.archivada);
-    const obraDef = avisoPorId(ultimoAviso())?.obraId || '';
     const panel = mostrarSheet(`${cabeceraSheet(titulo)}
-      ${soloNuevo ? '' : `<input class="input" type="search" placeholder="Buscar por número u obra" data-s="q" aria-label="Buscar aviso" autocomplete="off">
+      ${soloNuevo ? '' : `<input class="input" type="search" placeholder="Buscar por número, descripción u obra" data-s="q" aria-label="Buscar aviso" autocomplete="off">
       <div class="picklist" data-s="lista">${lista('')}</div>
       ${permitirNinguno ? '<button class="btn" data-s="ninguno">Sin aviso</button>' : ''}`}
       <details data-s="nuevo" ${soloNuevo || !S.avisos.length ? 'open' : ''}>
         <summary class="btn dashed" style="list-style:none;width:100%">+ Nuevo aviso</summary>
         <div class="card" style="margin-top:8px">
-          <label class="field">Número de aviso<input class="mono" data-s="num" placeholder="460945671-1" autocomplete="off" autocapitalize="off"><span class="help">9 dígitos, guion y 1 o 2 dígitos</span></label>
-          <label class="field">Obra<select data-s="obra"><option value="">— Obra nueva —</option>${obras.map((o) => `<option value="${o.id}" ${o.id === obraDef ? 'selected' : ''}>${esc(o.nombre)}</option>`).join('')}</select></label>
-          <label class="field ${obraDef && obras.length ? 'hidden' : ''}" data-s="obraWrap">Obra nueva (código y descripción)<input data-s="obraNueva" placeholder="31PO-4156 Quesería Manolito" autocomplete="off"></label>
+          ${camposAviso()}
           <p class="field"><span class="err" data-s="err"></span></p>
           <button class="btn primary" data-s="crear">Crear y elegir</button>
         </div>
       </details>`, () => resolve(undefined));
     const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
+    enlazarCamposAviso(panel);
     $('q')?.addEventListener('input', (e) => { $('lista').innerHTML = lista(e.target.value); });
-    $('obra').addEventListener('change', (e) => $('obraWrap').classList.toggle('hidden', !!e.target.value));
     $('num').addEventListener('input', () => { confirmarFormato = false; $('err').textContent = ''; });
     panel.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-s]');
@@ -285,31 +344,75 @@ function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actua
       if (s === 'pick') { await cerrarSheet(); resolve(b.dataset.id); }
       if (s === 'ninguno') { await cerrarSheet(); resolve(null); }
       if (s === 'crear') {
-        const num = $('num').value.trim().replace(/[\s./_]+/g, '-');
-        if (!num) { $('err').textContent = 'Escribe el número de aviso.'; return; }
-        const existe = S.avisos.find((a) => a.numero === num);
-        if (existe) { existe.archivado = false; guardar(); await cerrarSheet(); resolve(existe.id); return; }
-        if (!L.avisoValido(num) && !confirmarFormato) {
+        const numPrevio = $('num').value.trim().replace(/[\s./_]+/g, '-');
+        const existe = numPrevio && S.avisos.find((a) => a.numero === numPrevio);
+        if (existe) { existe.archivado = false; usar(existe.id); guardar(); await cerrarSheet(); resolve(existe.id); return; }
+        if (numPrevio && !L.avisoValido(numPrevio) && !confirmarFormato) {
           confirmarFormato = true;
           $('err').textContent = 'El formato no es el habitual (9 dígitos-guion-dígitos). Pulsa otra vez para crearlo igualmente.';
           return;
         }
-        let obraId = $('obra').value;
-        if (!obraId) {
-          const nombre = $('obraNueva').value.trim();
-          if (!nombre) { $('err').textContent = 'Escribe la obra (código y descripción).'; return; }
-          const ya = S.obras.find((o) => o.nombre.toLowerCase() === nombre.toLowerCase());
-          if (ya) obraId = ya.id;
-          else { obraId = uid(); S.obras.push({ id: obraId, nombre, archivada: false }); }
-        }
+        const r = leerCamposAviso(panel);
+        if (r.error) { $('err').textContent = r.error; return; }
         const id = uid();
-        S.avisos.push({ id, numero: num, obraId, archivado: false });
+        S.avisos.push({ id, numero: r.num, descripcion: r.desc, obraId: r.obraId, archivado: false });
         usar(id);
         guardar();
         await cerrarSheet();
         resolve(id);
       }
     });
+  });
+}
+
+/** Modificar un aviso: completar el número, cambiar descripción u obra, archivarlo. */
+function editarAviso(id) {
+  const a = avisoPorId(id);
+  if (!a) return;
+  let confirmarFormato = false;
+  const panel = mostrarSheet(`${cabeceraSheet(a.numero ? 'Aviso ' + a.numero : 'Aviso sin número')}
+    ${camposAviso({ num: a.numero, desc: a.descripcion, obraId: a.obraId || '' })}
+    <p class="field"><span class="err" data-s="err"></span></p>
+    <div class="grid2"><button class="btn" data-s="arch">${a.archivado ? 'Recuperar aviso' : 'Archivar aviso'}</button><button class="btn primary" data-s="ok">Guardar</button></div>
+    <p class="small muted" style="margin:0">Los avisos archivados no salen al elegir aviso, pero sus horas y gastos se conservan.</p>`);
+  enlazarCamposAviso(panel);
+  const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
+  $('num').addEventListener('input', () => { confirmarFormato = false; $('err').textContent = ''; });
+  panel.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
+    const s = b.dataset.s;
+    if (s === 'x') return cancelarSheet();
+    if (s === 'arch') {
+      a.archivado = !a.archivado;
+      await cerrarSheet();
+      commit();
+      return;
+    }
+    if (s === 'ok') {
+      const r = leerCamposAviso(panel);
+      if (r.error) { $('err').textContent = r.error; return; }
+      if (r.num && !L.avisoValido(r.num) && !confirmarFormato) {
+        confirmarFormato = true;
+        $('err').textContent = 'El formato no es el habitual (9 dígitos-guion-dígitos). Pulsa otra vez para guardarlo igualmente.';
+        return;
+      }
+      const otro = r.num && S.avisos.find((x) => x.id !== a.id && x.numero === r.num);
+      if (otro) {
+        if (!confirm(`Ya tienes el aviso ${r.num}. ¿Unir los dos? Las horas, dietas y gastos de este pasarán a ese.`)) return;
+        if (!otro.descripcion && r.desc) otro.descripcion = r.desc;
+        if (!otro.obraId && r.obraId) otro.obraId = r.obraId;
+        otro.archivado = false;
+        unirAvisos(a.id, otro.id);
+      } else {
+        a.numero = r.num;
+        a.descripcion = r.desc;
+        a.obraId = r.obraId;
+      }
+      await cerrarSheet();
+      commit();
+      toast('Aviso guardado');
+    }
   });
 }
 
@@ -393,7 +496,7 @@ const ACC = {
     const ahora = L.ahoraMin();
     const op = await elegirOpcion('¿A dónde vas?', [
       { v: 'casa', l: 'Vuelvo a casa o al hotel' },
-      { v: 'otro', l: 'Voy a otro cliente' },
+      { v: 'otro', l: 'Voy a otro aviso' },
     ]);
     if (op === undefined) return;
     let aviso = tramoAbierto()?.avisoId;
@@ -406,7 +509,10 @@ const ACC = {
     abrirTramo('desplazamiento', aviso, ahora);
     commit();
   },
-  nuevoTramo(d) { editarTramo(null, d.fecha); },
+  nuevoTramo(d) {
+    const pre = d.ini != null ? { ini: +d.ini, fin: +d.fin, avisoId: d.aviso || null } : null;
+    editarTramo(null, d.fecha, pre);
+  },
   editTramo(d) { editarTramo(d.id); },
   async tipoSeg(d) { await cambiarTipoSegmento(d.id, +d.ini, +d.fin); },
   comp(d) {
@@ -497,15 +603,7 @@ const ACC = {
     else if (r.trim()) o.nombre = r.trim();
     commit();
   },
-  async editarAviso(d) {
-    const a = avisoPorId(d.id);
-    if (!a) return;
-    const r = await pedirValor('Número de aviso', { valor: a.numero, mono: true, extra: a.archivado ? 'Recuperar aviso' : 'Archivar aviso', ayuda: 'Los avisos archivados no salen al elegir aviso, pero sus horas se conservan.' });
-    if (r === undefined) return;
-    if (r.extra) a.archivado = !a.archivado;
-    else if (r.trim()) a.numero = r.trim();
-    commit();
-  },
+  editarAviso(d) { editarAviso(d.id); },
   async nuevoAviso() {
     const a = await elegirAviso({ titulo: 'Nuevo aviso', soloNuevo: true });
     if (a) { commit(); toast('Aviso creado'); }
@@ -518,12 +616,12 @@ const ACC = {
 // ---------------------------------------------------------------------------
 // Editor de tramo
 // ---------------------------------------------------------------------------
-function editarTramo(id, fechaNueva) {
+function editarTramo(id, fechaNueva, pre = null) {
   const t0 = id ? S.tramos.find((t) => t.id === id) : null;
   if (id && !t0) return;
   const tmp = t0 ? { ...t0 } : {
-    id: uid(), fecha: fechaNueva || hoy(), ini: null, fin: null, clase: 'trabajo', tipo: null,
-    avisoId: ultimoAviso(), comp: S.ajustes.compDefecto, comentario: '',
+    id: uid(), fecha: fechaNueva || hoy(), ini: pre?.ini ?? null, fin: pre?.fin ?? null, clase: 'trabajo', tipo: null,
+    avisoId: pre ? pre.avisoId : ultimoAviso(), comp: S.ajustes.compDefecto, comentario: '',
   };
   let enCurso = !!t0 && t0.fin == null;
   let confirmarSolape = false;
@@ -836,6 +934,26 @@ const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const rango = (s) => `${L.fmtHora(s.ini)}–${s.abierto ? 'ahora' : L.fmtHora(s.fin)}`;
 const chip = (tipo, extra = '') => `<span class="chip t-${tipo}">${esc(L.TIPO[tipo]?.label || tipo)}${extra}</span>`;
 
+const IC_AVISO = svg('<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/>');
+/** Segmentos y huecos del día en orden, más los solapes de cada tramo. */
+function itemsDia(d) {
+  const sol = L.solapes(d.ts, d.f === hoy() ? L.ahoraMin() : null);
+  const hs = L.huecos(d.ts);
+  const items = [...d.segs.map((s) => ({ ini: s.ini, s })), ...hs.map((h) => ({ ini: h.ini, h }))]
+    .sort((a, b) => a.ini - b.ini || (a.h ? 1 : -1));
+  return { sol, hs, items };
+}
+const avisoAntesDe = (d, min) => d.ts.filter((t) => t.fin != null && t.fin <= min && t.avisoId).sort((a, b) => b.fin - a.fin)[0]?.avisoId || '';
+function msgSolape(sol, tramoId) {
+  const otros = sol.get(tramoId);
+  if (!otros) return '';
+  return `<div class="solapa-msg">${IC_AVISO}Se solapa con ${otros.map((o) => `${L.fmtHora(o.ini)}–${o.fin == null ? 'ahora' : L.fmtHora(o.fin)}`).join(', ')}</div>`;
+}
+function filaHueco(d, h, compacta = false) {
+  return `<div class="hueco"><span class="mono">${L.fmtHora(h.ini)}–${L.fmtHora(h.fin)}</span><span class="grow">Hueco sin fichar · ${L.fmtHM(h.fin - h.ini)}</span>
+    <button class="btn small" data-a="nuevoTramo" data-fecha="${d.f}" data-ini="${h.ini}" data-fin="${h.fin}" data-aviso="${avisoAntesDe(d, h.ini)}">${compacta ? '+ Tramo' : '+ Crear tramo'}</button></div>`;
+}
+
 function top({ kicker = '', titulo, atras = false, derecha = '' }) {
   return `<header class="top">
     ${atras ? `<button class="iconbtn plain" data-a="atras" aria-label="Volver">${IC.atras}</button>` : ''}
@@ -858,6 +976,10 @@ function vHoy() {
   if (S.tramos.length > 3 && (!uc || L.diasEntre(uc, f) >= 7)) {
     avisos += `<div class="warn">${uc ? `Tu última copia de seguridad es del ${L.fechaCorta(uc)}.` : 'Aún no has hecho ninguna copia de seguridad.'} <a class="linkbtn" href="#/ajustes">Hacer copia</a></div>`;
   }
+  const sinNum = avisosSinNumero();
+  if (sinNum.length) {
+    avisos += `<div class="warn">${sinNum.length > 1 ? 'Avisos' : 'Aviso'} pendiente${sinNum.length > 1 ? 's' : ''} de número: ${sinNum.map((a) => `<button class="linkbtn" data-a="editarAviso" data-id="${a.id}">${esc(a.descripcion || obraPorId(a.obraId)?.nombre || 'sin descripción')}</button>`).join(' ')}</div>`;
+  }
   if (!S.inicial) {
     avisos += `<div class="note">Para que las bolsas de prolongación y extras cuadren, mete en Ajustes lo que ya llevabas acumulado este año. <a href="#/ajustes">Ir a Ajustes</a></div>`;
   }
@@ -870,12 +992,12 @@ function vHoy() {
     if (ab.clase === 'desplazamiento' && !ab.tipo && tipo !== 'desplazamiento') etiqueta = `Viaje · ${etiqueta}`;
     let botones;
     if (ab.clase === 'desplazamiento') {
-      botones = `<button class="btn primary span2" data-a="llegoCliente">Llego al cliente</button>
+      botones = `<button class="btn primary span2" data-a="llegoCliente">Llego al aviso</button>
         <button class="btn" data-a="terminar">Llego a casa</button><button class="btn" data-a="comer">Paro a comer</button>`;
     } else if (ab.clase === 'comida') {
       botones = `<button class="btn primary span2" data-a="volver">Vuelvo al trabajo</button><button class="btn span2" data-a="terminar">Termino la jornada</button>`;
     } else {
-      botones = `<button class="btn primary span2" data-a="salgoCliente">Salgo del cliente</button>
+      botones = `<button class="btn primary span2" data-a="salgoCliente">Salgo del aviso</button>
         <button class="btn" data-a="comer">Paro a comer</button><button class="btn" data-a="cambioAviso">Cambio de aviso</button>
         <button class="btn span2" data-a="terminar">Termino aquí (sin viaje)</button>`;
     }
@@ -883,11 +1005,11 @@ function vHoy() {
     hero = `<section class="hero">
       <div class="hrow"><span class="chip t-${tipo}">${esc(etiqueta)} · en curso</span><span class="since">desde ${L.fmtHora(ab.ini)}</span></div>
       <div class="timer">${L.fmtHM(L.ahoraMin() - ab.ini)}</div>
-      ${ab.clase !== 'comida' ? `<div class="who">${i ? `<div class="since">Aviso <span class="num">${esc(i.num)}</span></div><div class="obra">${esc(i.obra)}</div>` : '<div class="obra">Sin aviso</div>'}</div>` : ''}
+      ${ab.clase !== 'comida' ? `<div class="who">${i ? `<div class="since">${i.num ? `Aviso <span class="num">${esc(i.num)}</span>` : 'Aviso todavía sin número'}</div><div class="obra">${esc(i.texto)}</div>` : '<div class="obra">Sin aviso</div>'}</div>` : ''}
       <div class="grid2">${botones}</div>
     </section>`;
   } else {
-    const estado = d.ts.length ? 'Jornada terminada' : d.festivo ? 'Hoy es festivo' : !d.laborable ? 'Fin de semana' : 'Sin empezar';
+    const estado = d.ts.length ? (d.tot.jornada >= d.objetivo ? 'Jornada terminada' : 'Sin tramo en curso') : d.festivo ? 'Hoy es festivo' : !d.laborable ? 'Fin de semana' : 'Sin empezar';
     hero = `<section class="hero">
       <div class="hrow"><span class="since">${estado}</span>${d.ts.length ? '<span class="since">trabajado hoy</span>' : ''}</div>
       ${d.ts.length ? `<div class="timer">${L.fmtHM(d.tot.computable)}</div>` : ''}
@@ -910,8 +1032,10 @@ function vHoy() {
     ${meter(cap(L.mesLargo(f.slice(0, 7))), mes.jornada, mes.objetivo, hMes, cMes)}
   </section>`;
 
-  const lista = d.segs.length
-    ? d.segs.map((s) => `<a class="row" href="#/dia/${f}"><span class="time">${rango(s)}</span>${chip(s.tipo)}<span class="dur">${L.fmtHM(s.fin - s.ini)}</span></a>`).join('')
+  const { sol, items } = itemsDia(d);
+  const lista = items.length
+    ? items.map(({ s, h }) => (h ? filaHueco(d, h, true)
+      : `<a class="row tint t-${s.tipo}${sol.has(s.tramoId) ? ' solapa' : ''}" href="#/dia/${f}"><span class="time">${rango(s)}</span>${chip(s.tipo)}${sol.has(s.tramoId) ? `<span class="solapa-ic" aria-label="Se solapa">${IC_AVISO}</span>` : ''}<span class="dur">${L.fmtHM(s.fin - s.ini)}</span></a>`)).join('')
     : '<div class="empty">Aún no has fichado nada hoy.</div>';
 
   return `${top({
@@ -934,15 +1058,17 @@ function vDia(f) {
   const warns = L.avisosDia(d.ts, d.segs, { laborable: d.laborable, verano: d.verano });
   const abiertoViejo = d.ts.find((t) => t.fin == null && f !== hoy());
   if (abiertoViejo) warns.unshift(`El tramo que empieza a las ${L.fmtHora(abiertoViejo.ini)} no tiene hora de fin.`);
-  const segs = d.segs.map((s) => `<div class="seg">
+  const { sol, items } = itemsDia(d);
+  const segs = items.map(({ s, h }) => (h ? filaHueco(d, h) : `<div class="seg tint t-${s.tipo}${sol.has(s.tramoId) ? ' solapa' : ''}">
       <div class="l1"><span class="mono" style="font-size:14px;font-weight:500">${rango(s)}</span><span class="dur mono" style="margin-left:auto;font-size:13px;color:var(--muted)">${L.fmtHM(s.fin - s.ini)}</span>
         <button class="iconbtn" style="width:40px;height:40px" data-a="editTramo" data-id="${s.tramoId}" aria-label="Modificar tramo">${IC.lapiz}</button></div>
       <div class="l2"><button class="chip t-${s.tipo}" data-a="tipoSeg" data-id="${s.tramoId}" data-ini="${s.ini}" data-fin="${s.fin}">${esc(L.TIPO[s.tipo].label)}${IC.abajo}</button>
         <span class="small muted">${s.manual ? 'fijado por ti' : 'propuesto'}</span></div>
       ${L.llevaAviso(s.tipo) ? `<div class="aviso">${avisoHTML(s.avisoId)}</div>` : ''}
       ${s.comentario ? `<div class="small">${esc(s.comentario)}</div>` : ''}
+      ${msgSolape(sol, s.tramoId)}
       ${s.tipo === 'extra' ? `<div class="segm small" role="group" aria-label="Compensación de la extra">${Object.keys(L.COMP).map((c) => `<button data-a="comp" data-id="${s.tramoId}" data-v="${c}" aria-pressed="${s.comp === c}">${L.COMP[c]}</button>`).join('')}</div>` : ''}
-    </div>`).join('');
+    </div>`)).join('');
   const sinFin = d.ts.filter((t) => t.fin == null && f !== hoy()).map((t) => `<div class="seg"><div class="l1"><span class="mono">${L.fmtHora(t.ini)}–?</span><button class="btn small" style="margin-left:auto" data-a="editTramo" data-id="${t.id}">Poner hora de fin</button></div></div>`).join('');
   const t = d.tot;
   return `${top({ kicker: `${f.slice(0, 4)} · ${marcas || 'Horario de invierno'}`, titulo: L.fechaLarga(f), atras: true,
@@ -993,7 +1119,7 @@ function vGastos(f) {
     const v = S.dietas[`${f}|${id}`] || {};
     const gs = gastos.filter((g) => g.avisoId === id);
     return `<section class="card">
-      <div><div class="mono" style="font-weight:600">${esc(i?.num || '?')}</div><div class="small muted">${esc(i?.obra || '')}</div></div>
+      <div style="display:flex;gap:8px;align-items:flex-start"><div class="grow" style="flex:1"><div style="font-weight:600">${i?.num ? `<span class="mono">${esc(i.num)}</span>` : SIN_NUM}</div><div class="small muted">${esc(i?.texto || '')}</div></div>${i && !i.num ? `<button class="btn small" data-a="editarAviso" data-id="${id}">Completar</button>` : ''}</div>
       <div class="label-up">Dietas</div>
       <div class="grid2">${L.DIETAS.map((dt) => `<button class="toggle" data-a="dieta" data-f="${f}" data-aviso="${id}" data-d="${dt.id}" aria-pressed="${!!v[dt.id]}">${dt.label}</button>`).join('')}</div>
       <div class="label-up">Gastos</div>
@@ -1045,63 +1171,118 @@ function gastosPeriodo(fechas) {
   return porAviso;
 }
 
+const CHEV = IC.sig.replace('<svg', '<svg width="16" height="16"');
+function pillsGasto(x) {
+  const out = x.dietas.map((dl) => `<span class="pill-s">Dieta ${esc(dl.toLowerCase())}</span>`);
+  for (const g of x.gastos) {
+    out.push(`<span class="pill-s">${esc(g.cat)} <b class="mono">${valorGasto(g)}</b>${g.fotos?.length ? ` · ${g.fotos.length} ticket${g.fotos.length > 1 ? 's' : ''}` : ''}</span>`);
+  }
+  return out.join('');
+}
+/** Bloque de gastos de un día (todos los avisos, o solo uno). */
+function bloqueGastos(f, soloAviso) {
+  const gp = gastosPeriodo([f]);
+  const partes = [];
+  for (const [id, porDia] of gp) {
+    if (soloAviso !== undefined && id !== soloAviso) continue;
+    const x = porDia.get(f);
+    if (!x || (!x.dietas.length && !x.gastos.length)) continue;
+    partes.push(`${soloAviso === undefined ? `<div class="gav">${avisoHTML(id)}</div>` : ''}<div class="pills">${pillsGasto(x)}</div>`);
+  }
+  if (!partes.length) return '';
+  return `<a class="gblock" href="#/gastos/${f}"><div class="label-up">Gastos</div>${partes.join('')}</a>`;
+}
+const cabeceraCols = (c2 = 'Tipo · aviso', acum = true) => `<div class="rrow rhead${acum ? '' : ' sin-acum'}"><span>Horario</span><span>${c2}</span><span class="r">Horas</span>${acum ? '<span class="r">Acum.</span>' : ''}</div>`;
+
 function vResumen() {
   const p = periodo();
   const r = resumen(p.fechas);
   const [hJ, cJ] = faltan(r.jornada, r.objetivo, R.modo === 'semana' ? 'semana' : 'mes');
   const fs = fset();
   const segsDe = (f) => calcDia(f).segs.filter((s) => !s.abierto || f === hoy());
+  const tieneGastos = (f) => S.gastos.some((g) => g.fecha === f) || Object.keys(S.dietas).some((k) => k.startsWith(f + '|'));
   let lista = '';
+
   if (R.vista === 'dia') {
     lista = p.fechas.map((f) => {
       const d = calcDia(f);
-      if (!d.segs.length && (L.diaSemana(f) >= 6 || f > hoy()) && !fs.has(f)) return '';
-      const tot = d.segs.length ? `${L.fmtHM(d.tot.jornada)}${d.tot.prol ? ` · P ${L.fmtHM(d.tot.prol)}` : ''}${d.tot.extra ? ` · E ${L.fmtHM(d.tot.extra)}` : ''}` : fs.has(f) ? 'Festivo' : 'Sin datos';
-      return `<a class="dayhead" href="#/dia/${f}"><b>${L.fechaCorta(f)}</b><span class="mono">${tot}</span>${IC.sig.replace('<svg', '<svg width="16" height="16"')}</a>
-        ${d.segs.map((s) => `<a class="srow" href="#/dia/${f}"><span class="mono">${rango(s)}</span><span class="txt-t t-${s.tipo}">${esc(L.TIPO[s.tipo].label)}${s.tipo === 'extra' ? ` · ${L.COMP[s.comp].toLowerCase()}` : ''}</span>${L.llevaAviso(s.tipo) ? `<span class="sub">${avisoHTML(s.avisoId)}</span>` : ''}</a>`).join('')}`;
+      const conGastos = tieneGastos(f);
+      if (!d.segs.length && !conGastos && (L.diaSemana(f) >= 6 || f > hoy()) && !fs.has(f)) return '';
+      const { sol, items } = itemsDia(d);
+      let acum = 0;
+      const filas = items.map(({ s, h }) => {
+        if (h) {
+          return `<a class="rrow hueco-r" href="#/dia/${f}"><span class="mono">${L.fmtHora(h.ini)}–${L.fmtHora(h.fin)}</span><span>Hueco sin fichar</span><span class="mono r">${L.fmtHM(h.fin - h.ini)}</span><span></span></a>`;
+        }
+        const m = s.fin - s.ini;
+        if (s.tipo !== 'comida') acum += m;
+        return `<a class="rrow tint t-${s.tipo}${sol.has(s.tramoId) ? ' solapa' : ''}" href="#/dia/${f}">
+          <span class="mono">${rango(s)}</span>
+          <span>${chip(s.tipo, s.tipo === 'extra' ? ` · ${L.COMP[s.comp].toLowerCase()}` : '')}${sol.has(s.tramoId) ? `<span class="solapa-ic" aria-label="Se solapa">${IC_AVISO}</span>` : ''}</span>
+          <span class="mono r">${L.fmtHM(m)}</span>
+          <span class="mono r acum${s.tipo === 'comida' ? ' muted' : ''}">${L.fmtHM(acum)}</span>
+          ${L.llevaAviso(s.tipo) ? `<span class="sub">${avisoHTML(s.avisoId)}</span>` : ''}
+        </a>`;
+      }).join('');
+      const detalle = d.segs.length
+        ? [`Jornada ${L.fmtHM(d.tot.jornada)}`, d.tot.prol && `Prol. ${L.fmtHM(d.tot.prol)}`, d.tot.extra && `Extra ${L.fmtHM(d.tot.extra)}`].filter(Boolean).join(' · ')
+        : fs.has(f) ? 'Festivo' : 'Sin horas';
+      return `<section class="card flush daycard">
+        <a class="dayband${d.segs.length || conGastos ? '' : ' vacio'}" href="#/dia/${f}">
+          <span class="grow"><b>${L.fechaLarga(f)}</b><span class="dsub">${detalle}${fs.has(f) && d.segs.length ? ' · Festivo' : ''}</span></span>
+          <span class="mono dtot">${d.segs.length ? L.fmtHM(d.tot.computable) : ''}</span>${CHEV}
+        </a>
+        ${filas ? cabeceraCols() + filas : ''}
+        ${bloqueGastos(f)}
+      </section>`;
     }).join('');
   } else if (R.vista === 'aviso') {
     const grupos = new Map();
+    const add = (k) => { if (!grupos.has(k)) grupos.set(k, []); return grupos.get(k); };
     for (const f of p.fechas) for (const s of segsDe(f)) {
-      if (s.tipo === 'comida') continue;
-      const k = L.llevaAviso(s.tipo) ? s.avisoId || '' : '';
-      if (!grupos.has(k)) grupos.set(k, []);
-      grupos.get(k).push({ f, s });
+      if (!L.llevaAviso(s.tipo)) continue;
+      add(s.avisoId || '').push({ f, s });
     }
+    for (const id of gastosPeriodo(p.fechas).keys()) add(id || '');
     lista = [...grupos.entries()].map(([id, xs]) => {
       const tot = {};
       xs.forEach(({ s }) => { tot[s.tipo] = (tot[s.tipo] || 0) + s.fin - s.ini; });
-      return `<div class="dayhead" style="flex-wrap:wrap"><b>${id ? avisoHTML(id) : 'Sin aviso'}</b></div>
-        <div style="padding:8px 14px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--line-soft)">${Object.entries(tot).map(([t, m]) => chip(t, ` ${L.fmtHM(m)}`)).join('')}</div>
-        ${xs.map(({ f, s }) => `<a class="srow" href="#/dia/${f}"><span class="mono">${L.fechaCorta(f)}</span><span><span class="mono">${rango(s)}</span> · <span class="txt-t t-${s.tipo}">${esc(L.TIPO[s.tipo].label)}</span></span></a>`).join('')}`;
+      const dias = [...new Set([...xs.map((x) => x.f), ...p.fechas.filter((f) => S.gastos.some((g) => g.fecha === f && g.avisoId === id) || S.dietas[`${f}|${id}`])])].sort();
+      const cuerpo = dias.map((f) => {
+        const filas = xs.filter((x) => x.f === f).map(({ s }) => `<a class="rrow sin-acum tint t-${s.tipo}" href="#/dia/${f}"><span class="mono">${rango(s)}</span><span>${chip(s.tipo, s.tipo === 'extra' ? ` · ${L.COMP[s.comp].toLowerCase()}` : '')}</span><span class="mono r">${L.fmtHM(s.fin - s.ini)}</span></a>`).join('');
+        return `<div class="subband">${L.fechaLarga(f)}</div>${filas}${bloqueGastos(f, id)}`;
+      }).join('');
+      return `<section class="card flush daycard">
+        <div class="dayband"><span class="grow"><b>${id ? avisoHTML(id) : 'Sin aviso'}</b></span>${id && !avisoPorId(id)?.numero ? `<button class="btn small" data-a="editarAviso" data-id="${id}">Completar</button>` : ''}</div>
+        ${Object.keys(tot).length ? `<div class="pills" style="padding:8px 14px">${Object.entries(tot).map(([t, m]) => chip(t, ` ${L.fmtHM(m)}`)).join('')}</div>` : ''}
+        ${cuerpo}
+      </section>`;
     }).join('');
   } else {
     lista = L.TIPOS.filter((t) => r.porTipo[t.id] > 0).map((t) => {
       const xs = [];
       for (const f of p.fechas) for (const s of segsDe(f)) if (s.tipo === t.id) xs.push({ f, s });
-      return `<div class="dayhead"><b class="txt-t t-${t.id}">${esc(t.label)}</b><span class="mono">${L.fmtHM(r.porTipo[t.id])}</span></div>
-        ${xs.map(({ f, s }) => `<a class="srow" href="#/dia/${f}"><span class="mono">${L.fechaCorta(f)}</span><span class="mono">${rango(s)}</span>${L.llevaAviso(t.id) ? `<span class="sub">${avisoHTML(s.avisoId)}</span>` : ''}</a>`).join('')}`;
+      return `<section class="card flush daycard">
+        <div class="dayband t-${t.id} tipoband"><span class="grow"><b>${esc(t.label)}</b></span><span class="mono dtot">${L.fmtHM(r.porTipo[t.id])}</span></div>
+        ${xs.map(({ f, s }) => `<a class="rrow sin-acum tint t-${t.id}" href="#/dia/${f}"><span class="mono">${L.fechaCorta(f)}</span><span class="mono">${rango(s)}</span><span class="mono r">${L.fmtHM(s.fin - s.ini)}</span>${L.llevaAviso(t.id) ? `<span class="sub">${avisoHTML(s.avisoId)}</span>` : ''}</a>`).join('')}
+      </section>`;
     }).join('');
+    const gastosDias = p.fechas.map((f) => {
+      const b = bloqueGastos(f);
+      return b ? `<div class="subband">${L.fechaLarga(f)}</div>${b}` : '';
+    }).join('');
+    if (gastosDias) lista += `<section class="card flush daycard"><div class="dayband"><b>Gastos</b></div>${gastosDias}</section>`;
   }
 
-  const gp = gastosPeriodo(p.fechas);
-  let totKm = 0, totEur = 0, tickets = 0;
   const cuentaDietas = Object.fromEntries(L.DIETAS.map((d) => [d.label, 0]));
-  const bloquesGastos = [...gp.entries()].map(([id, porDia]) => {
-    const filas = [...porDia.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([f, x]) => {
+  let totKm = 0;
+  for (const [, porDia] of gastosPeriodo(p.fechas)) {
+    for (const [, x] of porDia) {
       x.dietas.forEach((dl) => { cuentaDietas[dl]++; });
-      const partes = [];
-      if (x.dietas.length) partes.push(x.dietas.join(', '));
-      for (const g of x.gastos) {
-        if (g.cat === 'Kilómetros') totKm += g.km || 0; else totEur += g.importe || 0;
-        tickets += g.fotos?.length || 0;
-        partes.push(`${g.cat} ${valorGasto(g)}${g.fotos?.length ? ` (${g.fotos.length} ticket${g.fotos.length > 1 ? 's' : ''})` : ''}`);
-      }
-      return `<a class="srow" href="#/gastos/${f}"><span class="mono">${L.fechaCorta(f)}</span><span style="font-size:13px">${esc(partes.join(' · '))}</span></a>`;
-    }).join('');
-    return `<div class="dayhead"><b>${avisoHTML(id)}</b></div>${filas}`;
-  }).join('');
-  const resumenDietas = Object.entries(cuentaDietas).filter(([, n]) => n).map(([l, n]) => `${l}: ${n}`).join(' · ') || 'Sin dietas';
+      x.gastos.forEach((g) => { if (g.cat === 'Kilómetros') totKm += g.km || 0; });
+    }
+  }
+  const resumenGastos = [...Object.entries(cuentaDietas).filter(([, n]) => n).map(([l, n]) => `${l}: ${n}`), totKm ? `${numES(totKm)} km` : ''].filter(Boolean).join(' · ');
 
   return `${top({ titulo: 'Resumen' })}
   <main class="content">
@@ -1118,12 +1299,10 @@ function vResumen() {
         <div><div class="k">Libranza prol.</div><div class="v">${L.fmtHM(-r.porTipo.libranza_prol)}</div></div>
         <div><div class="k">Extra</div><div class="v txt-t t-extra">${L.fmtHM(r.extra)}</div></div>
       </div>
+      ${resumenGastos ? `<div class="small muted" style="border-top:1px solid var(--line-soft);padding-top:8px">Gastos: ${resumenGastos}</div>` : ''}
     </section>
     <div class="pills"><span class="small muted">Ver por</span>${[['dia', 'Día'], ['aviso', 'Aviso'], ['tipo', 'Tipo de hora']].map(([v, l]) => `<button class="pill" data-a="resVista" data-v="${v}" aria-pressed="${R.vista === v}">${l}</button>`).join('')}</div>
-    <div class="card flush">${lista || '<div class="empty">No hay horas en este periodo.</div>'}</div>
-    <div class="sec-title"><h2>Gastos</h2><span class="small muted">${resumenDietas}</span></div>
-    <div class="card flush">${bloquesGastos || '<div class="empty">No hay gastos en este periodo.</div>'}
-      ${bloquesGastos ? `<div class="row"><span class="small muted">Total</span><span class="mono" style="margin-left:auto">${numES(totKm)} km · ${euros(totEur)} · ${tickets} ticket${tickets === 1 ? '' : 's'}</span></div>` : ''}</div>
+    ${lista || '<div class="card"><p class="muted">No hay horas ni gastos en este periodo.</p></div>'}
     <div class="grid3">
       <button class="btn" data-a="exportExcel">Excel</button>
       <button class="btn" data-a="exportPDF">PDF</button>
@@ -1218,13 +1397,15 @@ function vAjustes() {
 
     <section class="card">
       <h2>Obras y avisos</h2>
-      ${obras.map((o) => {
-        const avs = S.avisos.filter((a) => a.obraId === o.id && (verArchivados || !a.archivado));
+      <p class="small muted">Toca un aviso para completar su número, cambiar la descripción o la obra, o archivarlo.</p>
+      ${[...obras.map((o) => ({ o, avs: S.avisos.filter((a) => a.obraId === o.id) })), { o: null, avs: S.avisos.filter((a) => !a.obraId || !obraPorId(a.obraId)) }].map(({ o, avs }) => {
+        avs = avs.filter((a) => verArchivados || !a.archivado);
+        if (!o && !avs.length) return '';
         return `<div style="border-top:1px solid var(--line-soft);padding-top:8px">
-          <div style="display:flex;align-items:center;gap:8px"><div class="grow" style="flex:1;font-weight:600">${esc(o.nombre)}${o.archivada ? ' <span class="small muted">(archivada)</span>' : ''}</div><button class="linkbtn" data-a="renombrarObra" data-id="${o.id}">Editar</button></div>
-          <div class="pills" style="margin-top:4px">${avs.map((a) => `<button class="pill mono" data-a="editarAviso" data-id="${a.id}" style="${a.archivado ? 'opacity:.55' : ''}">${esc(a.numero)}</button>`).join('') || '<span class="small muted">Sin avisos</span>'}</div>
+          <div style="display:flex;align-items:center;gap:8px"><div class="grow" style="flex:1;font-weight:600">${o ? esc(o.nombre) : '<span class="muted">Sin obra</span>'}${o?.archivada ? ' <span class="small muted">(archivada)</span>' : ''}</div>${o ? `<button class="linkbtn" data-a="renombrarObra" data-id="${o.id}">Editar</button>` : ''}</div>
+          <div class="pills" style="margin-top:4px">${avs.map((a) => `<button class="pill" data-a="editarAviso" data-id="${a.id}" style="${a.archivado ? 'opacity:.55' : ''}">${a.numero ? `<span class="mono">${esc(a.numero)}</span>` : SIN_NUM}${a.descripcion ? ` ${esc(a.descripcion)}` : ''}</button>`).join('') || '<span class="small muted">Sin avisos</span>'}</div>
         </div>`;
-      }).join('') || '<span class="small muted">Aún no tienes obras. Se crean al elegir aviso por primera vez.</span>'}
+      }).join('') || '<span class="small muted">Aún no tienes avisos. Se crean al elegir aviso por primera vez.</span>'}
       <div class="grid2"><button class="btn" data-a="nuevoAviso">+ Nuevo aviso</button><button class="btn" data-a="verArchivados">${verArchivados ? 'Ocultar archivados' : 'Ver archivados'}</button></div>
     </section>
 
@@ -1271,18 +1452,22 @@ function guardarSaldos() {
 function filasPeriodo(fechas) {
   const horas = [];
   for (const f of fechas) {
+    let acum = 0, primero = true;
     for (const s of calcDia(f).segs) {
       if (s.abierto) continue;
-      const i = infoAviso(s.avisoId);
-      horas.push({ f, s, num: i?.num || '', obra: i?.obra || '' });
+      if (s.tipo !== 'comida') acum += s.fin - s.ini;
+      const i = L.llevaAviso(s.tipo) ? infoAviso(s.avisoId) : null;
+      horas.push({ f, s, acum, primero, num: i ? i.num || 'SIN Nº' : '', desc: i?.desc || '', obra: i?.obra || '' });
+      primero = false;
     }
   }
   const gastos = [];
   for (const [id, porDia] of gastosPeriodo(fechas)) {
     const i = infoAviso(id);
     for (const [f, x] of [...porDia.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      for (const dl of x.dietas) gastos.push({ f, num: i?.num || '', obra: i?.obra || '', concepto: `Dieta ${dl.toLowerCase()}`, km: null, importe: null, detalle: '', tickets: 0 });
-      for (const g of x.gastos) gastos.push({ f, num: i?.num || '', obra: i?.obra || '', concepto: g.cat, km: g.cat === 'Kilómetros' ? g.km : null, importe: g.cat === 'Kilómetros' ? null : g.importe, detalle: g.detalle || '', tickets: g.fotos?.length || 0 });
+      const num = i ? i.num || 'SIN Nº' : '';
+      for (const dl of x.dietas) gastos.push({ f, num, desc: i?.desc || '', obra: i?.obra || '', concepto: `Dieta ${dl.toLowerCase()}`, km: null, importe: null, detalle: '', tickets: 0 });
+      for (const g of x.gastos) gastos.push({ f, num, desc: i?.desc || '', obra: i?.obra || '', concepto: g.cat, km: g.cat === 'Kilómetros' ? g.km : null, importe: g.cat === 'Kilómetros' ? null : g.importe, detalle: g.detalle || '', tickets: g.fotos?.length || 0 });
     }
   }
   return { horas, gastos };
@@ -1293,21 +1478,21 @@ function exportarExcel() {
   const { horas, gastos } = filasPeriodo(p.fechas);
   const r = resumen(p.fechas);
   const B = (v) => ({ v, b: true });
-  const hojaHoras = [[B('Fecha'), B('Día'), B('Inicio'), B('Fin'), B('Horas'), B('Horas (decimal)'), B('Tipo'), B('Compensación'), B('Aviso'), B('Obra'), B('Comentario')]];
-  for (const { f, s, num, obra } of horas) {
+  const hojaHoras = [[B('Fecha'), B('Día'), B('Inicio'), B('Fin'), B('Horas'), B('Horas (decimal)'), B('Acumulado día'), B('Tipo'), B('Compensación'), B('Aviso'), B('Descripción aviso'), B('Obra'), B('Comentario')]];
+  for (const { f, s, acum, num, desc, obra } of horas) {
     const m = s.fin - s.ini;
-    hojaHoras.push([fechaES(f), L.nombreDia(f), L.fmtHora(s.ini), L.fmtHora(s.fin), L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }, L.TIPO[s.tipo].label, s.tipo === 'extra' ? L.COMP[s.comp] : '', L.llevaAviso(s.tipo) ? num : '', L.llevaAviso(s.tipo) ? obra : '', s.comentario || '']);
+    hojaHoras.push([fechaES(f), L.nombreDia(f), L.fmtHora(s.ini), L.fmtHora(s.fin), L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }, L.fmtHM(acum), L.TIPO[s.tipo].label, s.tipo === 'extra' ? L.COMP[s.comp] : '', num, desc, obra, s.comentario || '']);
   }
-  const hojaGastos = [[B('Fecha'), B('Aviso'), B('Obra'), B('Concepto'), B('Km'), B('Importe (€)'), B('Detalle'), B('Tickets')]];
-  for (const g of gastos) hojaGastos.push([fechaES(g.f), g.num, g.obra, g.concepto, g.km ?? '', g.importe != null ? { v: g.importe, n: 'dec' } : '', g.detalle, g.tickets || '']);
+  const hojaGastos = [[B('Fecha'), B('Aviso'), B('Descripción aviso'), B('Obra'), B('Concepto'), B('Km'), B('Importe (€)'), B('Detalle'), B('Tickets')]];
+  for (const g of gastos) hojaGastos.push([fechaES(g.f), g.num, g.desc, g.obra, g.concepto, g.km ?? '', g.importe != null ? { v: g.importe, n: 'dec' } : '', g.detalle, g.tickets || '']);
   const hojaRes = [[B('Concepto'), B('Horas'), B('Horas (decimal)')]];
   const lineaRes = (l, m) => hojaRes.push([l, L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }]);
   lineaRes('Jornada objetivo', r.objetivo);
   lineaRes('Jornada hecha', r.jornada);
   for (const t of L.TIPOS) if (r.porTipo[t.id]) lineaRes(t.label, r.porTipo[t.id]);
   const bytes = xlsxBytes([
-    { name: 'Horas', rows: hojaHoras, widths: [11, 6, 8, 8, 8, 9, 22, 14, 15, 32, 30] },
-    { name: 'Gastos', rows: hojaGastos, widths: [11, 15, 32, 18, 8, 11, 30, 8] },
+    { name: 'Horas', rows: hojaHoras, widths: [11, 6, 8, 8, 8, 9, 10, 22, 14, 15, 26, 32, 30] },
+    { name: 'Gastos', rows: hojaGastos, widths: [11, 15, 26, 32, 18, 8, 11, 30, 8] },
     { name: 'Resumen', rows: hojaRes, widths: [26, 10, 14] },
   ]);
   descargar(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `horas-${p.archivo}.xlsx`);
@@ -1322,12 +1507,12 @@ function imprimir() {
   el.innerHTML = `<h1>Control horario · ${esc(p.titulo)} ${esc(p.sub)}</h1>
     <p>Jornada: ${L.fmtHM(r.jornada)} de ${L.fmtHM(r.objetivo)} · Prolongación: ${L.fmtHM(r.prol)} · Extra: ${L.fmtHM(r.extra)}</p>
     <h2>Horas</h2>
-    <table><thead><tr><th>Fecha</th><th>Inicio</th><th>Fin</th><th class="num">Horas</th><th>Tipo</th><th>Aviso</th><th>Obra</th></tr></thead><tbody>
-    ${horas.map(({ f, s, num, obra }) => `<tr><td>${L.fechaCorta(f)}</td><td>${L.fmtHora(s.ini)}</td><td>${L.fmtHora(s.fin)}</td><td class="num">${L.fmtHM(s.fin - s.ini)}</td><td>${esc(L.TIPO[s.tipo].label)}${s.tipo === 'extra' ? ' (' + L.COMP[s.comp].toLowerCase() + ')' : ''}</td><td>${L.llevaAviso(s.tipo) ? esc(num) : ''}</td><td>${L.llevaAviso(s.tipo) ? esc(obra) : ''}</td></tr>`).join('') || '<tr><td colspan="7">Sin horas</td></tr>'}
+    <table><thead><tr><th>Fecha</th><th>Inicio</th><th>Fin</th><th class="num">Horas</th><th class="num">Acum.</th><th>Tipo</th><th>Aviso</th><th>Obra</th></tr></thead><tbody>
+    ${horas.map(({ f, s, acum, primero, num, desc, obra }) => `<tr class="${primero ? 'nuevo-dia' : ''}"><td>${primero ? L.fechaCorta(f) : ''}</td><td>${L.fmtHora(s.ini)}</td><td>${L.fmtHora(s.fin)}</td><td class="num">${L.fmtHM(s.fin - s.ini)}</td><td class="num">${s.tipo === 'comida' ? '' : L.fmtHM(acum)}</td><td><span class="pt t-${s.tipo}">${esc(L.TIPO[s.tipo].label)}</span>${s.tipo === 'extra' ? ' (' + L.COMP[s.comp].toLowerCase() + ')' : ''}</td><td>${esc(num)}</td><td>${esc([desc, obra].filter(Boolean).join(' · '))}</td></tr>`).join('') || '<tr><td colspan="8">Sin horas</td></tr>'}
     </tbody></table>
     <h2>Gastos</h2>
     <table><thead><tr><th>Fecha</th><th>Aviso</th><th>Obra</th><th>Concepto</th><th class="num">Km</th><th class="num">Importe</th><th>Detalle</th></tr></thead><tbody>
-    ${gastos.map((g) => `<tr><td>${L.fechaCorta(g.f)}</td><td>${esc(g.num)}</td><td>${esc(g.obra)}</td><td>${esc(g.concepto)}</td><td class="num">${g.km != null ? numES(g.km) : ''}</td><td class="num">${g.importe != null ? euros(g.importe) : ''}</td><td>${esc(g.detalle)}</td></tr>`).join('') || '<tr><td colspan="7">Sin gastos</td></tr>'}
+    ${gastos.map((g) => `<tr><td>${L.fechaCorta(g.f)}</td><td>${esc(g.num)}</td><td>${esc([g.desc, g.obra].filter(Boolean).join(' · '))}</td><td>${esc(g.concepto)}</td><td class="num">${g.km != null ? numES(g.km) : ''}</td><td class="num">${g.importe != null ? euros(g.importe) : ''}</td><td>${esc(g.detalle)}</td></tr>`).join('') || '<tr><td colspan="7">Sin gastos</td></tr>'}
     </tbody></table>`;
   setTimeout(() => window.print(), 50);
 }
@@ -1344,7 +1529,7 @@ async function exportarTickets() {
       if (!blob) continue;
       n++;
       const ext = blob.type === 'application/pdf' ? 'pdf' : blob.type === 'image/png' ? 'png' : 'jpg';
-      const nombre = `${g.fecha}_${(i?.num || 'sin-aviso')}_${g.cat}${n > 1 ? '_' + n : ''}.${ext}`.replace(/[^\w.\-áéíóúñÁÉÍÓÚÑ]/g, '_');
+      const nombre = `${g.fecha}_${(i?.num || (i ? 'sin-numero' : 'sin-aviso'))}_${g.cat}${n > 1 ? '_' + n : ''}.${ext}`.replace(/[^\w.\-áéíóúñÁÉÍÓÚÑ]/g, '_');
       files.push({ name: nombre, data: new Uint8Array(await blob.arrayBuffer()) });
     }
   }
