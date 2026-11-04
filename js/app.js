@@ -2,7 +2,7 @@ import * as L from './logic.js';
 import * as DB from './db.js';
 import { zipBytes, xlsxBytes } from './export.js';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -195,36 +195,100 @@ function unirAvisos(desde, hacia) {
 }
 
 // Campos comunes para crear o modificar un aviso
+const normTxt = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+const normNum = (s) => String(s || '').trim().replace(/[\s.,/_]+/g, '-');
+const resumenAviso = (a) => [a.descripcion, obraPorId(a.obraId)?.nombre].filter(Boolean).join(' · ') || 'sin descripción';
 function camposAviso({ num = '', desc = '', obraId = '' } = {}) {
-  const obras = S.obras.filter((o) => !o.archivada || o.id === obraId);
-  return `<label class="field">Número de aviso<input class="mono" data-s="num" value="${esc(num)}" placeholder="460945671-1" autocomplete="off" autocapitalize="off"><span class="help">Si aún no lo tienes, déjalo vacío y pon una descripción. Lo completas cuando lo tengas.</span></label>
-    <label class="field">Descripción<input data-s="desc" value="${esc(desc)}" placeholder="Ej.: avería compresor línea 2" autocomplete="off"></label>
-    <label class="field">Obra<select data-s="obra">
-      <option value="">— Sin obra (la pongo luego) —</option>
-      ${obras.map((o) => `<option value="${o.id}" ${o.id === obraId ? 'selected' : ''}>${esc(o.nombre)}</option>`).join('')}
-      <option value="__nueva">+ Obra nueva…</option>
-    </select></label>
-    <label class="field hidden" data-s="obraWrap">Obra nueva (código y descripción)<input data-s="obraNueva" placeholder="31PO-4156 Quesería Manolito" autocomplete="off"></label>`;
+  const obra = obraPorId(obraId)?.nombre || '';
+  return `<label class="field">Número de aviso<input class="mono" data-s="num" value="${esc(num)}" placeholder="Ej.: 460945671-1" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="next"><span class="help" data-s="numInfo"></span></label>
+    <label class="field">Descripción<input data-s="desc" value="${esc(desc)}" placeholder="Ej.: avería compresor línea 2" autocomplete="off" enterkeyhint="next"></label>
+    <label class="field"><span>Obra <span class="opc">(opcional)</span></span><input data-s="obra" value="${esc(obra)}" placeholder="Escribe código o nombre" autocomplete="off" enterkeyhint="done"></label>
+    <div class="sugs" data-s="sugs"></div>`;
 }
-function enlazarCamposAviso(panel) {
+/** Obras sin archivar, las usadas más recientemente primero. */
+function obrasRecientes() {
+  const uso = {};
+  for (const a of S.avisos) {
+    const t = S.ajustes.usoAvisos[a.id] || 0;
+    if (a.obraId && t > (uso[a.obraId] || 0)) uso[a.obraId] = t;
+  }
+  return S.obras.filter((o) => !o.archivada).sort((x, y) => (uso[y.id] || 0) - (uso[x.id] || 0) || x.nombre.localeCompare(y.nombre, 'es'));
+}
+/** Da vida a los campos: comprobación del número y sugerencias de obra mientras se escribe. */
+function enlazarCamposAviso(panel, { avisoId = null, onNum = null } = {}) {
   const q = (s) => panel.querySelector(`[data-s="${s}"]`);
-  q('obra').addEventListener('change', (e) => q('obraWrap').classList.toggle('hidden', e.target.value !== '__nueva'));
+  const editando = !!avisoId;
+  const infoNum = () => {
+    const n = normNum(q('num').value);
+    let txt, cls = '';
+    if (!n) txt = 'Si aún no lo tienes, déjalo vacío y pon una descripción. Lo completas cuando lo tengas.';
+    else {
+      const otro = S.avisos.find((a) => a.numero === n && a.id !== avisoId);
+      if (otro) {
+        txt = editando ? `Ya tienes otro aviso con este número (${resumenAviso(otro)}). Al guardar te preguntaré si quieres unirlos.` : `Ya tienes este aviso (${resumenAviso(otro)}). Al aceptar se usará ese.`;
+        cls = 'info';
+      } else if (L.avisoValido(n)) { txt = '✓ Formato correcto'; cls = 'ok'; }
+      else { txt = 'El formato no es el habitual (9 dígitos, guion y 1 o 2 dígitos). Puedes usarlo igualmente.'; cls = 'aviso'; }
+    }
+    q('numInfo').textContent = txt;
+    q('numInfo').className = `help ${cls}`;
+  };
+  let verSugs = !!q('obra').value.trim();
+  const sugerir = () => {
+    const texto = q('obra').value;
+    const t = normTxt(texto);
+    const exacta = t && S.obras.find((o) => normTxt(o.nombre) === t);
+    let html = '';
+    if (verSugs && !exacta) {
+      const trozos = t.split(' ').filter(Boolean);
+      const lista = obrasRecientes().filter((o) => trozos.every((x) => normTxt(o.nombre).includes(x))).slice(0, t ? 6 : 4);
+      if (lista.length) html += `<div class="label-up">${t ? 'Toca la obra si es una de estas' : 'Tus obras recientes'}</div>${lista.map((o) => `<button type="button" class="sug" data-s="sug" data-id="${o.id}">${esc(o.nombre)}</button>`).join('')}`;
+    }
+    if (!t) html += '<span class="help">Si la dejas vacía, la pones luego.</span>';
+    else if (exacta) html += '<span class="help ok">✓ Obra que ya tienes</span>';
+    else html += `<span class="help info">Si no es ninguna de tus obras, al aceptar se crea la obra nueva «${esc(texto.trim())}».</span>`;
+    q('sugs').innerHTML = html;
+  };
+  q('num').addEventListener('input', () => { infoNum(); onNum?.(); });
+  q('obra').addEventListener('input', () => { verSugs = true; sugerir(); });
+  q('obra').addEventListener('focus', () => { if (!verSugs) { verSugs = true; sugerir(); } });
+  q('sugs').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s="sug"]');
+    if (!b) return;
+    e.stopPropagation();
+    q('obra').value = obraPorId(b.dataset.id)?.nombre || '';
+    q('obra').blur();
+    sugerir();
+  });
+  // «Siguiente» en el teclado pasa al campo siguiente; en la obra, cierra el teclado.
+  panel.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+    const sig = { num: 'desc', desc: 'obra' }[e.target.dataset.s];
+    if (!sig && e.target.dataset.s !== 'obra') return;
+    e.preventDefault();
+    if (sig) q(sig).focus();
+    else e.target.blur();
+  });
+  infoNum();
+  sugerir();
 }
-/** Lee y valida los campos. Devuelve {num, desc, obraId} o {error}. Crea la obra nueva si hace falta. */
+/** Lee los campos. Devuelve {num, desc, obraTxt} o {error}. No crea nada todavía. */
 function leerCamposAviso(panel) {
   const q = (s) => panel.querySelector(`[data-s="${s}"]`);
-  const num = q('num').value.trim().replace(/[\s./_]+/g, '-');
+  const num = normNum(q('num').value);
   const desc = q('desc').value.trim();
+  const obraTxt = q('obra').value.trim().replace(/\s+/g, ' ');
   if (!num && !desc) return { error: 'Pon el número de aviso o, si aún no lo tienes, una descripción.' };
-  let obraId = q('obra').value || null;
-  if (obraId === '__nueva') {
-    const nombre = q('obraNueva').value.trim();
-    if (!nombre) return { error: 'Escribe la obra nueva (código y descripción).' };
-    const ya = S.obras.find((o) => o.nombre.toLowerCase() === nombre.toLowerCase());
-    if (ya) obraId = ya.id;
-    else { obraId = uid(); S.obras.push({ id: obraId, nombre, archivada: false }); }
-  }
-  return { num, desc, obraId };
+  return { num, desc, obraTxt };
+}
+/** Id de la obra escrita: la existente si coincide (sin mirar mayúsculas ni tildes) o una nueva. */
+function obraDesdeTexto(txt) {
+  if (!txt) return null;
+  const ya = S.obras.find((o) => normTxt(o.nombre) === normTxt(txt));
+  if (ya) { ya.archivada = false; return ya.id; }
+  const id = uid();
+  S.obras.push({ id, nombre: txt, archivada: false });
+  return id;
 }
 const usar = (id) => { if (id) S.ajustes.usoAvisos[id] = Date.now(); };
 function ultimoAviso() {
@@ -238,27 +302,101 @@ function ultimoAviso() {
 const tramoAbierto = () => S.tramos.find((t) => t.fin == null);
 
 // ---------------------------------------------------------------------------
+// Navegación y botón «atrás» del móvil
+// ---------------------------------------------------------------------------
+// El historial es una pila: abajo, la pestaña (Hoy, Gastos, Resumen o Bolsas); encima, los
+// submenús abiertos desde ella. Cambiar de pestaña o pasar de un día a otro no apila nada.
+// Así «atrás» sube un nivel hasta la pestaña y, desde la pestaña, sale de la app.
+const PESTANAS = ['hoy', 'gastos', 'resumen', 'bolsas'];
+const tipoRuta = (hash) => String(hash || '').replace(/^#\/?/, '').split('/')[0] || 'hoy';
+const estadoNav = () => (history.state && history.state.ch ? history.state : null);
+let navPendiente = null; // destino que se aplica cuando termina un history.go()
+let pintado = null; // ruta que se ve ahora en pantalla
+
+function pintarRuta(y = 0) {
+  if (document.getElementById('sheet')) return;
+  render();
+  window.scrollTo(0, y || 0);
+}
+function ir(hash, { pestana = false } = {}) {
+  if (navPendiente) return;
+  const st = estadoNav();
+  const pila = st ? st.pila : [location.hash || '#/hoy'];
+  const volverA = (pasos, nuevaPila) => { navPendiente = { hash, pila: nuevaPila }; history.go(-pasos); };
+  if (pestana) {
+    if (pila.length > 1) return volverA(pila.length - 1, [hash]);
+    history.replaceState({ ch: 1, pila: [hash] }, '', hash);
+  } else if (tipoRuta(pila[pila.length - 1]) === tipoRuta(hash)) {
+    // Otro día del mismo submenú: sustituye, no apila
+    history.replaceState({ ch: 1, pila: [...pila.slice(0, -1), hash] }, '', hash);
+  } else {
+    const i = pila.findIndex((h) => tipoRuta(h) === tipoRuta(hash));
+    if (i >= 0) return volverA(pila.length - 1 - i, [...pila.slice(0, i), hash]);
+    history.replaceState({ ch: 1, pila, y: window.scrollY }, ''); // para volver al mismo sitio
+    history.pushState({ ch: 1, pila: [...pila, hash] }, '', hash);
+  }
+  pintarRuta();
+}
+function volver() {
+  const st = estadoNav();
+  if (st && st.pila.length > 1) history.back();
+  else ir('#/hoy', { pestana: true });
+}
+
+// ---------------------------------------------------------------------------
 // Hojas inferiores (diálogos)
 // ---------------------------------------------------------------------------
 let sheetCancel = null;
+let sheetAtras = null; // si la hoja tiene un segundo paso, «atrás» vuelve al primero
 let esperandoPop = null;
 
-function mostrarSheet(html, cancel) {
+/** Con el teclado abierto, sube la hoja para que quede entera encima de él. */
+function ajustarTeclado() {
+  const el = document.getElementById('sheet');
+  const vv = window.visualViewport;
+  if (!el || !vv) return;
+  const tapado = Math.abs(vv.scale - 1) > 0.01 ? 0 : Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  el.style.setProperty('--teclado', `${tapado}px`);
+  el.style.setProperty('--alto-visible', `${Math.round(tapado ? vv.height : window.innerHeight)}px`);
+  el.classList.toggle('teclado', tapado > 80);
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener('resize', () => {
+    ajustarTeclado();
+    const a = document.activeElement;
+    if (a?.closest?.('#sheet') && a.matches('input, textarea')) setTimeout(() => a.scrollIntoView({ block: 'nearest' }), 60);
+  });
+  visualViewport.addEventListener('scroll', ajustarTeclado);
+}
+
+/** Abre una hoja. Si se pasa `pie`, esos botones quedan fijos abajo, siempre a la vista. */
+function mostrarSheet(html, cancel, pie = '') {
   document.getElementById('sheet')?.remove();
   const el = document.createElement('div');
   el.id = 'sheet';
-  el.innerHTML = `<div class="panel" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`;
+  el.innerHTML = pie
+    ? `<div class="panel con-pie" role="dialog" aria-modal="true"><div class="sheet-body"><div class="grab"></div>${html}</div><div class="sheet-foot">${pie}</div></div>`
+    : `<div class="panel" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`;
   el.addEventListener('click', (e) => { if (e.target === el) cancelarSheet(); });
   document.body.appendChild(el);
-  if (!(history.state && history.state.sheet)) history.pushState({ sheet: true }, '');
+  if (!(history.state && history.state.sheet)) history.pushState({ ...(history.state || {}), sheet: true, paso: 1 }, '');
   sheetCancel = cancel || null;
+  ajustarTeclado();
   return el.querySelector('.panel');
+}
+/** Segundo paso dentro de la misma hoja: «atrás» llama a `alVolver` en vez de cerrarla. */
+function pasoSheet(alVolver) {
+  const st = history.state || {};
+  if (st.sheet && (st.paso || 1) < 2) history.pushState({ ...st, paso: 2 }, '');
+  sheetAtras = alVolver;
 }
 function cerrarSheet() {
   return new Promise((res) => {
     document.getElementById('sheet')?.remove();
     sheetCancel = null;
-    if (history.state && history.state.sheet) { esperandoPop = res; history.back(); } else res();
+    sheetAtras = null;
+    const st = history.state;
+    if (st && st.sheet) { esperandoPop = res; history.go(-(st.paso || 1)); } else res();
   });
 }
 async function cancelarSheet() {
@@ -269,7 +407,36 @@ async function cancelarSheet() {
 window.addEventListener('popstate', () => {
   if (esperandoPop) { const r = esperandoPop; esperandoPop = null; r(); return; }
   const el = document.getElementById('sheet');
-  if (el) { el.remove(); const c = sheetCancel; sheetCancel = null; if (c) c(); }
+  if (el) {
+    if (sheetAtras && history.state && history.state.sheet) { const f = sheetAtras; sheetAtras = null; f(); return; }
+    el.remove();
+    const c = sheetCancel;
+    sheetCancel = null;
+    sheetAtras = null;
+    if (c) c();
+    if (location.hash !== pintado) pintarRuta();
+    return;
+  }
+  if (navPendiente) {
+    const p = navPendiente;
+    navPendiente = null;
+    history.replaceState({ ch: 1, pila: p.pila }, '', p.hash);
+    pintarRuta();
+    return;
+  }
+  if (history.state && history.state.sheet) { history.back(); return; } // hoja que ya no está abierta
+  if (!estadoNav()) {
+    // Paso guardado por una versión anterior de la app: se salta
+    pintarRuta();
+    history.back();
+    return;
+  }
+  pintarRuta(history.state.y);
+});
+window.addEventListener('hashchange', () => {
+  if (location.hash === pintado || document.getElementById('sheet')) return;
+  if (!estadoNav()) history.replaceState({ ch: 1, pila: [location.hash] }, '');
+  pintarRuta();
 });
 const cabeceraSheet = (titulo) => `<div class="sheet-head"><h3>${esc(titulo)}</h3><button class="iconbtn plain" data-s="x" aria-label="Cerrar">${IC.x}</button></div>`;
 
@@ -308,60 +475,101 @@ function filaAviso(a, actual) {
   const texto = [a.descripcion, o?.nombre].filter(Boolean).join(' · ') || 'Sin obra';
   return `<button data-s="pick" data-id="${a.id}"><span class="num">${a.numero ? esc(a.numero) : SIN_NUM}${a.id === actual ? ' ✓' : ''}</span><span class="ob">${esc(texto)}</span></button>`;
 }
+const pareceNumero = (q) => /^\d[\d\s.,/_-]*$/.test((q || '').trim());
 
+/**
+ * Elegir un aviso de la lista o crear uno nuevo.
+ * Paso 1: buscador y lista. Paso 2 («+ Nuevo»): hoja propia con Cancelar / Aceptar fijos abajo.
+ */
 function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actual = null, soloNuevo = false } = {}) {
   return new Promise((resolve) => {
-    let confirmarFormato = false;
+    const cancelar = () => resolve(undefined);
+    let busqueda = '';
     const lista = (q) => {
-      q = (q || '').trim().toLowerCase();
+      q = (q || '').trim();
+      const nq = normTxt(q);
       const avs = S.avisos.filter((a) => !a.archivado)
-        .filter((a) => !q || [a.numero, a.descripcion, obraPorId(a.obraId)?.nombre].some((x) => (x || '').toLowerCase().includes(q)))
+        .filter((a) => !nq || [a.numero, a.descripcion, obraPorId(a.obraId)?.nombre].some((x) => normTxt(x).includes(nq)))
         .sort((x, y) => (S.ajustes.usoAvisos[y.id] || 0) - (S.ajustes.usoAvisos[x.id] || 0));
-      if (!avs.length) return `<div class="empty">${S.avisos.length ? 'Ningún aviso coincide.' : 'Aún no tienes avisos. Crea el primero aquí abajo.'}</div>`;
-      return avs.map((a) => filaAviso(a, actual)).join('');
+      const num = normNum(q);
+      const crear = pareceNumero(q) && L.avisoValido(num) && !S.avisos.some((a) => a.numero === num)
+        ? `<button data-s="nuevo" class="crear">+ Crear el aviso <span class="mono">${esc(num)}</span></button>` : '';
+      if (!avs.length) {
+        return crear || '<div class="empty">Ningún aviso coincide. Si es nuevo, pulsa «+ Nuevo».</div>';
+      }
+      return crear + avs.map((a) => filaAviso(a, actual)).join('');
     };
-    const panel = mostrarSheet(`${cabeceraSheet(titulo)}
-      ${soloNuevo ? '' : `<input class="input" type="search" placeholder="Buscar por número, descripción u obra" data-s="q" aria-label="Buscar aviso" autocomplete="off">
-      <div class="picklist" data-s="lista">${lista('')}</div>
-      ${permitirNinguno ? '<button class="btn" data-s="ninguno">Sin aviso</button>' : ''}`}
-      <details data-s="nuevo" ${soloNuevo || !S.avisos.length ? 'open' : ''}>
-        <summary class="btn dashed" style="list-style:none;width:100%">+ Nuevo aviso</summary>
-        <div class="card" style="margin-top:8px">
-          ${camposAviso()}
-          <p class="field"><span class="err" data-s="err"></span></p>
-          <button class="btn primary" data-s="crear">Crear y elegir</button>
-        </div>
-      </details>`, () => resolve(undefined));
-    const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
-    enlazarCamposAviso(panel);
-    $('q')?.addEventListener('input', (e) => { $('lista').innerHTML = lista(e.target.value); });
-    $('num').addEventListener('input', () => { confirmarFormato = false; $('err').textContent = ''; });
-    panel.addEventListener('click', async (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b || b.tagName === 'SUMMARY' || b.tagName === 'DETAILS') return;
-      const s = b.dataset.s;
-      if (s === 'x') return cancelarSheet();
-      if (s === 'pick') { await cerrarSheet(); resolve(b.dataset.id); }
-      if (s === 'ninguno') { await cerrarSheet(); resolve(null); }
-      if (s === 'crear') {
-        const numPrevio = $('num').value.trim().replace(/[\s./_]+/g, '-');
-        const existe = numPrevio && S.avisos.find((a) => a.numero === numPrevio);
-        if (existe) { existe.archivado = false; usar(existe.id); guardar(); await cerrarSheet(); resolve(existe.id); return; }
-        if (numPrevio && !L.avisoValido(numPrevio) && !confirmarFormato) {
-          confirmarFormato = true;
-          $('err').textContent = 'El formato no es el habitual (9 dígitos-guion-dígitos). Pulsa otra vez para crearlo igualmente.';
+
+    const pintarLista = () => {
+      const panel = mostrarSheet(`${cabeceraSheet(titulo)}
+        <div class="buscar-nuevo"><input class="input" type="search" placeholder="Buscar aviso u obra" data-s="q" aria-label="Buscar aviso" autocomplete="off" value="${esc(busqueda)}"><button class="btn primary" data-s="nuevo">+ Nuevo</button></div>
+        <div class="picklist" data-s="lista">${lista(busqueda)}</div>
+        ${permitirNinguno ? '<button class="btn" data-s="ninguno">Sin aviso</button>' : ''}`, cancelar);
+      const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
+      $('q').addEventListener('input', (e) => { busqueda = e.target.value; $('lista').innerHTML = lista(busqueda); });
+      panel.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-s]');
+        if (!b || b.tagName === 'INPUT') return;
+        const s = b.dataset.s;
+        if (s === 'x') return cancelarSheet();
+        if (s === 'pick') { await cerrarSheet(); resolve(b.dataset.id); }
+        if (s === 'ninguno') { await cerrarSheet(); resolve(null); }
+        if (s === 'nuevo') {
+          pintarNuevo({ num: pareceNumero(busqueda) ? normNum(busqueda) : '' }, true);
+          pasoSheet(() => pintarLista());
+        }
+      });
+    };
+
+    const pintarNuevo = (pre = {}, desdeLista = false) => {
+      let confirmarFormato = false;
+      const panel = mostrarSheet(`${cabeceraSheet('Nuevo aviso')}
+        ${camposAviso(pre)}
+        <p class="field" style="margin:0"><span class="err" data-s="err"></span></p>`, cancelar,
+      '<button class="btn" data-s="cancelar">Cancelar</button><button class="btn primary" data-s="aceptar">Aceptar</button>');
+      const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
+      const err = (m) => { $('err').textContent = m; };
+      enlazarCamposAviso(panel, { onNum: () => { confirmarFormato = false; err(''); } });
+      setTimeout(() => (pre.num ? $('desc') : $('num')).focus(), 60);
+      panel.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-s]');
+        if (!b || b.tagName === 'INPUT') return;
+        const s = b.dataset.s;
+        if (s === 'x') return cancelarSheet();
+        if (s === 'cancelar') {
+          if (desdeLista) history.back(); // vuelve a la lista
+          else cancelarSheet();
           return;
         }
+        if (s !== 'aceptar') return;
         const r = leerCamposAviso(panel);
-        if (r.error) { $('err').textContent = r.error; return; }
+        if (r.error) return err(r.error);
+        const existe = r.num && S.avisos.find((a) => a.numero === r.num);
+        if (existe) {
+          existe.archivado = false;
+          if (!existe.descripcion && r.desc) existe.descripcion = r.desc;
+          if (!existe.obraId && r.obraTxt) existe.obraId = obraDesdeTexto(r.obraTxt);
+          usar(existe.id);
+          guardar();
+          await cerrarSheet();
+          resolve(existe.id);
+          return;
+        }
+        if (r.num && !L.avisoValido(r.num) && !confirmarFormato) {
+          confirmarFormato = true;
+          return err('El número no tiene el formato habitual. Pulsa Aceptar otra vez para usarlo igualmente.');
+        }
         const id = uid();
-        S.avisos.push({ id, numero: r.num, descripcion: r.desc, obraId: r.obraId, archivado: false });
+        S.avisos.push({ id, numero: r.num, descripcion: r.desc, obraId: obraDesdeTexto(r.obraTxt), archivado: false });
         usar(id);
         guardar();
         await cerrarSheet();
         resolve(id);
-      }
-    });
+      });
+    };
+
+    if (soloNuevo || !S.avisos.some((a) => !a.archivado)) pintarNuevo();
+    else pintarLista();
   });
 }
 
@@ -372,12 +580,11 @@ function editarAviso(id) {
   let confirmarFormato = false;
   const panel = mostrarSheet(`${cabeceraSheet(a.numero ? 'Aviso ' + a.numero : 'Aviso sin número')}
     ${camposAviso({ num: a.numero, desc: a.descripcion, obraId: a.obraId || '' })}
-    <p class="field"><span class="err" data-s="err"></span></p>
-    <div class="grid2"><button class="btn" data-s="arch">${a.archivado ? 'Recuperar aviso' : 'Archivar aviso'}</button><button class="btn primary" data-s="ok">Guardar</button></div>
-    <p class="small muted" style="margin:0">Los avisos archivados no salen al elegir aviso, pero sus horas y gastos se conservan.</p>`);
-  enlazarCamposAviso(panel);
+    <p class="field" style="margin:0"><span class="err" data-s="err"></span></p>
+    <p class="small muted" style="margin:0">Los avisos archivados no salen al elegir aviso, pero sus horas y gastos se conservan.</p>`, null,
+  `<button class="btn" data-s="arch">${a.archivado ? 'Recuperar aviso' : 'Archivar aviso'}</button><button class="btn primary" data-s="ok">Guardar</button>`);
   const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
-  $('num').addEventListener('input', () => { confirmarFormato = false; $('err').textContent = ''; });
+  enlazarCamposAviso(panel, { avisoId: a.id, onNum: () => { confirmarFormato = false; $('err').textContent = ''; } });
   panel.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-s]');
     if (!b || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
@@ -394,20 +601,20 @@ function editarAviso(id) {
       if (r.error) { $('err').textContent = r.error; return; }
       if (r.num && !L.avisoValido(r.num) && !confirmarFormato) {
         confirmarFormato = true;
-        $('err').textContent = 'El formato no es el habitual (9 dígitos-guion-dígitos). Pulsa otra vez para guardarlo igualmente.';
+        $('err').textContent = 'El número no tiene el formato habitual. Pulsa Guardar otra vez para guardarlo igualmente.';
         return;
       }
       const otro = r.num && S.avisos.find((x) => x.id !== a.id && x.numero === r.num);
       if (otro) {
         if (!confirm(`Ya tienes el aviso ${r.num}. ¿Unir los dos? Las horas, dietas y gastos de este pasarán a ese.`)) return;
         if (!otro.descripcion && r.desc) otro.descripcion = r.desc;
-        if (!otro.obraId && r.obraId) otro.obraId = r.obraId;
+        if (!otro.obraId && r.obraTxt) otro.obraId = obraDesdeTexto(r.obraTxt);
         otro.archivado = false;
         unirAvisos(a.id, otro.id);
       } else {
         a.numero = r.num;
         a.descripcion = r.desc;
-        a.obraId = r.obraId;
+        a.obraId = obraDesdeTexto(r.obraTxt);
       }
       await cerrarSheet();
       commit();
@@ -486,7 +693,7 @@ const ACC = {
   },
   async cambioAviso() {
     const ahora = L.ahoraMin();
-    const a = await elegirAviso({ titulo: 'Nuevo aviso', actual: tramoAbierto()?.avisoId });
+    const a = await elegirAviso({ titulo: '¿A qué aviso cambias?', actual: tramoAbierto()?.avisoId });
     if (a === undefined) return;
     cerrarAbierto(ahora);
     abrirTramo('trabajo', a, ahora);
@@ -543,10 +750,7 @@ const ACC = {
     S.festivos.sort();
     commit();
   },
-  atras() {
-    if (history.length > 1) history.back();
-    else location.hash = '#/hoy';
-  },
+  atras() { volver(); },
   // Gastos
   dieta(d) {
     const k = `${d.f}|${d.aviso}`;
@@ -609,8 +813,7 @@ const ACC = {
     if (a) { commit(); toast('Aviso creado'); }
   },
   verArchivados() { verArchivados = !verArchivados; render(); },
-  async copiaDescargar() { await hacerCopia(false); },
-  async copiaCompartir() { await hacerCopia(true); },
+  async copiaDescargar() { await hacerCopia(); },
 };
 
 // ---------------------------------------------------------------------------
@@ -913,14 +1116,16 @@ function ruta() {
   return { p: p || 'hoy', arg };
 }
 
-function meter(nombre, valor, max, hint, cls = '', color = 'var(--ink)') {
+function meter(nombre, valor, max, hint, cls = '', color = 'var(--ink)', verMax = true) {
   const pct = max > 0 ? Math.min(100, Math.round((valor / max) * 100)) : valor > 0 ? 100 : 0;
   return `<div class="meter">
-    <div class="head"><span class="name">${esc(nombre)}</span><span class="val"><b>${L.fmtHM(valor)}</b> <span class="muted">/ ${L.fmtHM(max)}</span></span></div>
+    <div class="head"><span class="name">${esc(nombre)}</span><span class="val"><b>${L.fmtHM(valor)}</b>${verMax ? ` <span class="muted">/ ${L.fmtHM(max)}</span>` : ''}</span></div>
     <div class="bar" style="--c:${color}"><i style="width:${pct}%"></i></div>
     ${hint ? `<div class="hint ${cls}">${hint}</div>` : ''}
   </div>`;
 }
+// La extra no tiene tope diario: la barra se llena a las 2:00 solo como escala visual (no es un límite)
+const ESCALA_BARRA_EXTRA = 120;
 const NOMBRES = { jornada: ['la jornada', 'Jornada cumplida'], semana: ['la semana', 'Semana cumplida'], mes: ['el mes', 'Mes cumplido'] };
 function faltan(hecho, objetivo, que) {
   const d = objetivo - hecho;
@@ -1024,10 +1229,10 @@ function vHoy() {
   const [hDia, cDia] = d.objetivo ? faltan(d.tot.jornada, d.objetivo, 'jornada') : ['Hoy no es laborable: lo que trabajes cuenta como extra', ''];
   const [hSem, cSem] = faltan(sem.jornada, sem.objetivo, 'semana');
   const [hMes, cMes] = faltan(mes.jornada, mes.objetivo, 'mes');
-  const extraHoy = d.tot.extra ? ` · Extra hoy: ${L.fmtHM(d.tot.extra)}` : '';
   const contadores = `<section class="card">
     ${meter('Jornada de hoy', d.tot.jornada, d.objetivo, hDia, cDia, '#1D5FB8')}
-    ${d.laborable ? meter('Prolongación de hoy', d.tot.prol, L.PROL_MAX_DIA, (d.tot.prol >= L.PROL_MAX_DIA ? 'Máximo diario alcanzado: lo que siga se propone como extra' : 'Pasadas las 2:00 se propone como extra') + extraHoy, d.tot.prol >= L.PROL_MAX_DIA ? 'bad' : '', '#B45309') : (d.tot.extra ? `<div class="meter"><div class="head"><span class="name">Extra de hoy</span><span class="val"><b>${L.fmtHM(d.tot.extra)}</b></span></div></div>` : '')}
+    ${d.laborable ? meter('Prolongación de hoy', d.tot.prol, L.PROL_MAX_DIA, d.tot.prol >= L.PROL_MAX_DIA ? 'Máximo diario alcanzado: lo que siga se propone como extra' : 'Pasadas las 2:00 se propone como extra', d.tot.prol >= L.PROL_MAX_DIA ? 'bad' : '', '#B45309') : ''}
+    ${meter('Extra de hoy', d.tot.extra, ESCALA_BARRA_EXTRA, '', '', '#B91C1C', false)}
     ${meter(`Semana ${L.semanaISO(f)}`, sem.jornada, sem.objetivo, hSem, cSem)}
     ${meter(cap(L.mesLargo(f.slice(0, 7))), mes.jornada, mes.objetivo, hMes, cMes)}
   </section>`;
@@ -1411,12 +1616,9 @@ function vAjustes() {
 
     <section class="card">
       <h2>Copia de seguridad</h2>
-      <p class="small muted">Los datos y las fotos solo están en este móvil. Haz una copia de vez en cuando y guárdala en Drive o envíatela por correo.</p>
+      <p class="small muted">Los datos y las fotos solo están en este móvil. Descarga una copia de vez en cuando: el archivo queda en Descargas y desde ahí puedes subirlo a Drive o enviártelo por correo.</p>
       <p class="small">Última copia: <b>${S.ajustes.ultimaCopia ? L.fechaLarga(S.ajustes.ultimaCopia, true) : 'nunca'}</b></p>
-      <div class="grid2">
-        <button class="btn primary" data-a="copiaCompartir">Guardar en Drive…</button>
-        <button class="btn" data-a="copiaDescargar">Descargar copia</button>
-      </div>
+      <button class="btn primary" data-a="copiaDescargar">Descargar copia</button>
       <label class="btn filebtn">Restaurar desde una copia<input type="file" accept="application/json,.json" data-campo="restaurar"></label>
     </section>
     <p class="small muted" style="text-align:center">Control horario · versión ${VERSION}</p>
@@ -1547,7 +1749,7 @@ const blobAB64 = (blob) => new Promise((ok, mal) => {
   r.onerror = () => mal(r.error);
   r.readAsDataURL(blob);
 });
-async function hacerCopia(compartir) {
+async function hacerCopia() {
   toast('Preparando copia…');
   const fotos = [];
   for (const id of await DB.fotoClaves()) {
@@ -1556,17 +1758,7 @@ async function hacerCopia(compartir) {
   }
   const json = JSON.stringify({ app: 'control-horario', version: 1, creada: new Date().toISOString(), estado: S, fotos });
   const nombre = `control-horario-copia-${hoy()}.json`;
-  const file = new File([json], nombre, { type: 'application/json' });
-  let hecho = false;
-  if (compartir && navigator.canShare && navigator.canShare({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file], title: 'Copia control horario' });
-      hecho = true;
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-    }
-  }
-  if (!hecho) descargar(file, nombre);
+  descargar(new Blob([json], { type: 'application/json' }), nombre);
   S.ajustes.ultimaCopia = hoy();
   commit();
   toast('Copia hecha');
@@ -1615,6 +1807,7 @@ function render() {
     default: html = vHoy(); tab = 'hoy';
   }
   app.innerHTML = html;
+  pintado = location.hash;
   document.querySelectorAll('nav.tabs a').forEach((a) => {
     if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -1623,11 +1816,20 @@ function render() {
 }
 
 document.addEventListener('click', (e) => {
+  if (e.target.closest('#sheet')) return;
   const el = e.target.closest('[data-a]');
-  if (!el || el.closest('#sheet')) return;
-  e.preventDefault();
-  const fn = ACC[el.dataset.a];
-  if (fn) Promise.resolve(fn(el.dataset, el)).catch((err) => { console.error(err); toast('Error: ' + err.message); });
+  if (el) {
+    e.preventDefault();
+    const fn = ACC[el.dataset.a];
+    if (fn) Promise.resolve(fn(el.dataset, el)).catch((err) => { console.error(err); toast('Error: ' + err.message); });
+    return;
+  }
+  // Enlaces entre pantallas: los gestiona la navegación para que «atrás» suba de nivel
+  const a = e.target.closest('a[href^="#/"]');
+  if (a) {
+    e.preventDefault();
+    ir(a.getAttribute('href'), { pestana: !!a.closest('nav.tabs') });
+  }
 });
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-campo]');
@@ -1644,11 +1846,6 @@ document.addEventListener('change', (e) => {
   }
   if (el.dataset.campo === 'restaurar' && el.files[0]) restaurar(el.files[0]).catch((err) => toast('Error: ' + err.message));
 });
-window.addEventListener('hashchange', () => {
-  if (document.getElementById('sheet')) return;
-  render();
-  window.scrollTo(0, 0);
-});
 
 async function iniciar() {
   try {
@@ -1658,7 +1855,18 @@ async function iniciar() {
     return;
   }
   try { await navigator.storage?.persist?.(); } catch { /* sin permiso: seguimos */ }
+  // Primer paso del historial: la pestaña. Si se abre en un submenú, se pone Hoy debajo.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  if (!estadoNav()) {
+    const h = location.hash || '#/hoy';
+    if (PESTANAS.includes(tipoRuta(h))) history.replaceState({ ch: 1, pila: [h] }, '', h);
+    else {
+      history.replaceState({ ch: 1, pila: ['#/hoy'] }, '', '#/hoy');
+      history.pushState({ ch: 1, pila: ['#/hoy', h] }, '', h);
+    }
+  }
   render();
+  if (history.state && history.state.sheet) history.back(); // se recargó con una hoja abierta
   setInterval(() => {
     const p = ruta().p;
     if (!document.getElementById('sheet') && document.visibilityState === 'visible' && p === 'hoy') render();
