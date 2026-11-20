@@ -2,7 +2,7 @@ import * as L from './logic.js';
 import * as DB from './db.js';
 import { zipBytes, xlsxBytes } from './export.js';
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -22,6 +22,10 @@ const parseNum = (s) => {
   return isFinite(n) ? n : NaN;
 };
 const fechaES = (f) => `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(0, 4)}`;
+const fmtN = (n, d) => Number(n).toLocaleString('es-ES', { minimumFractionDigits: d, maximumFractionDigits: d });
+const numIn = (n) => (n == null ? '' : String(n).replace('.', ',')); // valor para un campo de texto
+const fmtP = (n) => Number(n).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 3 }); // precios por km o kWh
+const kmTxt = (n) => Math.round(n).toLocaleString('es-ES', { useGrouping: 'always' });
 
 const svg = (p, w = 2) => `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
 const IC = {
@@ -36,6 +40,7 @@ const IC = {
   lapiz: svg('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>'),
   camara: svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>', 1.8),
   x: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  rayo: svg('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>', 1.8),
 };
 
 function toast(msg, accion) {
@@ -65,18 +70,31 @@ function descargar(blob, nombre) {
 // Estado
 // ---------------------------------------------------------------------------
 let S = null;
+// En el código los casos se siguen llamando «avisos» (avisos, avisoId…) para que los datos
+// y las copias de seguridad de antes sigan valiendo. En pantalla siempre pone «caso».
 const estadoVacio = () => ({
   v: 1,
   obras: [], avisos: [], tramos: [], dias: {}, festivos: [], dietas: {}, gastos: [],
+  cargas: [], // coche eléctrico (v1.3)
   inicial: null,
-  ajustes: { compDefecto: 'cobro', ultimaCopia: null, usoAvisos: {} },
+  ajustes: {
+    compDefecto: 'cobro', ultimaCopia: null, usoAvisos: {},
+    recordatorios: L.recordatoriosDefecto(), recCerrados: [],
+    coche: { activo: false, precioCasa: null, pagoKm: null },
+  },
 });
-
-async function cargar() {
-  S = (await DB.leer('estado')) || estadoVacio();
+/** Rellena lo que falte con los valores por defecto (datos y copias de versiones anteriores). */
+function completarEstado() {
   const base = estadoVacio();
   for (const k of Object.keys(base)) if (S[k] == null) S[k] = base[k];
   S.ajustes = { ...base.ajustes, ...S.ajustes };
+  S.ajustes.recordatorios = { ...base.ajustes.recordatorios, ...S.ajustes.recordatorios };
+  S.ajustes.coche = { ...base.ajustes.coche, ...S.ajustes.coche };
+}
+
+async function cargar() {
+  S = (await DB.leer('estado')) || estadoVacio();
+  completarEstado();
 }
 
 let cola = Promise.resolve();
@@ -166,15 +184,10 @@ function infoAviso(id) {
   return { num: a.numero || '', desc, obra, texto: [desc, obra].filter(Boolean).join(' · ') };
 }
 const SIN_NUM = '<span class="sinnum">Sin nº</span>';
-function avisoHTML(id, vacio = 'Sin aviso') {
+function avisoHTML(id, vacio = 'Sin caso') {
   const i = infoAviso(id);
   if (!i) return `<span class="muted">${vacio}</span>`;
   return `${i.num ? `<span class="mono">${esc(i.num)}</span>` : SIN_NUM}${i.texto ? ' · ' + esc(i.texto) : ''}`;
-}
-/** Avisos con horas o gastos que todavía no tienen número. */
-function avisosSinNumero() {
-  const usados = new Set([...S.tramos.map((t) => t.avisoId), ...S.gastos.map((g) => g.avisoId)]);
-  return S.avisos.filter((a) => !a.numero && !a.archivado && usados.has(a.id));
 }
 function unirAvisos(desde, hacia) {
   for (const t of S.tramos) if (t.avisoId === desde) t.avisoId = hacia;
@@ -200,7 +213,7 @@ const normNum = (s) => String(s || '').trim().replace(/[\s.,/_]+/g, '-');
 const resumenAviso = (a) => [a.descripcion, obraPorId(a.obraId)?.nombre].filter(Boolean).join(' · ') || 'sin descripción';
 function camposAviso({ num = '', desc = '', obraId = '' } = {}) {
   const obra = obraPorId(obraId)?.nombre || '';
-  return `<label class="field">Número de aviso<input class="mono" data-s="num" value="${esc(num)}" placeholder="Ej.: 460945671-1" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="next"><span class="help" data-s="numInfo"></span></label>
+  return `<label class="field">Número de caso<input class="mono" data-s="num" value="${esc(num)}" placeholder="Ej.: 460945671-1" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="next"><span class="help" data-s="numInfo"></span></label>
     <label class="field">Descripción<input data-s="desc" value="${esc(desc)}" placeholder="Ej.: avería compresor línea 2" autocomplete="off" enterkeyhint="next"></label>
     <label class="field"><span>Obra <span class="opc">(opcional)</span></span><input data-s="obra" value="${esc(obra)}" placeholder="Escribe código o nombre" autocomplete="off" enterkeyhint="done"></label>
     <div class="sugs" data-s="sugs"></div>`;
@@ -225,7 +238,7 @@ function enlazarCamposAviso(panel, { avisoId = null, onNum = null } = {}) {
     else {
       const otro = S.avisos.find((a) => a.numero === n && a.id !== avisoId);
       if (otro) {
-        txt = editando ? `Ya tienes otro aviso con este número (${resumenAviso(otro)}). Al guardar te preguntaré si quieres unirlos.` : `Ya tienes este aviso (${resumenAviso(otro)}). Al aceptar se usará ese.`;
+        txt = editando ? `Ya tienes otro caso con este número (${resumenAviso(otro)}). Al guardar te preguntaré si quieres unirlos.` : `Ya tienes este caso (${resumenAviso(otro)}). Al aceptar se usará ese.`;
         cls = 'info';
       } else if (L.avisoValido(n)) { txt = '✓ Formato correcto'; cls = 'ok'; }
       else { txt = 'El formato no es el habitual (9 dígitos, guion y 1 o 2 dígitos). Puedes usarlo igualmente.'; cls = 'aviso'; }
@@ -278,7 +291,7 @@ function leerCamposAviso(panel) {
   const num = normNum(q('num').value);
   const desc = q('desc').value.trim();
   const obraTxt = q('obra').value.trim().replace(/\s+/g, ' ');
-  if (!num && !desc) return { error: 'Pon el número de aviso o, si aún no lo tienes, una descripción.' };
+  if (!num && !desc) return { error: 'Pon el número de caso o, si aún no lo tienes, una descripción.' };
   return { num, desc, obraTxt };
 }
 /** Id de la obra escrita: la existente si coincide (sin mirar mayúsculas ni tildes) o una nueva. */
@@ -304,10 +317,10 @@ const tramoAbierto = () => S.tramos.find((t) => t.fin == null);
 // ---------------------------------------------------------------------------
 // Navegación y botón «atrás» del móvil
 // ---------------------------------------------------------------------------
-// El historial es una pila: abajo, la pestaña (Hoy, Gastos, Resumen o Bolsas); encima, los
+// El historial es una pila: abajo, la pestaña (Hoy, Casos, Gastos, Resumen o Bolsas); encima, los
 // submenús abiertos desde ella. Cambiar de pestaña o pasar de un día a otro no apila nada.
 // Así «atrás» sube un nivel hasta la pestaña y, desde la pestaña, sale de la app.
-const PESTANAS = ['hoy', 'gastos', 'resumen', 'bolsas'];
+const PESTANAS = ['hoy', 'casos', 'gastos', 'resumen', 'bolsas'];
 const tipoRuta = (hash) => String(hash || '').replace(/^#\/?/, '').split('/')[0] || 'hoy';
 const estadoNav = () => (history.state && history.state.ch ? history.state : null);
 let navPendiente = null; // destino que se aplica cuando termina un history.go()
@@ -481,7 +494,7 @@ const pareceNumero = (q) => /^\d[\d\s.,/_-]*$/.test((q || '').trim());
  * Elegir un aviso de la lista o crear uno nuevo.
  * Paso 1: buscador y lista. Paso 2 («+ Nuevo»): hoja propia con Cancelar / Aceptar fijos abajo.
  */
-function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actual = null, soloNuevo = false } = {}) {
+function elegirAviso({ titulo = 'Elige el caso', permitirNinguno = false, actual = null, soloNuevo = false } = {}) {
   return new Promise((resolve) => {
     const cancelar = () => resolve(undefined);
     let busqueda = '';
@@ -493,18 +506,18 @@ function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actua
         .sort((x, y) => (S.ajustes.usoAvisos[y.id] || 0) - (S.ajustes.usoAvisos[x.id] || 0));
       const num = normNum(q);
       const crear = pareceNumero(q) && L.avisoValido(num) && !S.avisos.some((a) => a.numero === num)
-        ? `<button data-s="nuevo" class="crear">+ Crear el aviso <span class="mono">${esc(num)}</span></button>` : '';
+        ? `<button data-s="nuevo" class="crear">+ Crear el caso <span class="mono">${esc(num)}</span></button>` : '';
       if (!avs.length) {
-        return crear || '<div class="empty">Ningún aviso coincide. Si es nuevo, pulsa «+ Nuevo».</div>';
+        return crear || '<div class="empty">Ningún caso coincide. Si es nuevo, pulsa «+ Nuevo».</div>';
       }
       return crear + avs.map((a) => filaAviso(a, actual)).join('');
     };
 
     const pintarLista = () => {
       const panel = mostrarSheet(`${cabeceraSheet(titulo)}
-        <div class="buscar-nuevo"><input class="input" type="search" placeholder="Buscar aviso u obra" data-s="q" aria-label="Buscar aviso" autocomplete="off" value="${esc(busqueda)}"><button class="btn primary" data-s="nuevo">+ Nuevo</button></div>
+        <div class="buscar-nuevo"><input class="input" type="search" placeholder="Buscar caso u obra" data-s="q" aria-label="Buscar caso" autocomplete="off" value="${esc(busqueda)}"><button class="btn primary" data-s="nuevo">+ Nuevo</button></div>
         <div class="picklist" data-s="lista">${lista(busqueda)}</div>
-        ${permitirNinguno ? '<button class="btn" data-s="ninguno">Sin aviso</button>' : ''}`, cancelar);
+        ${permitirNinguno ? '<button class="btn" data-s="ninguno">Sin caso</button>' : ''}`, cancelar);
       const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
       $('q').addEventListener('input', (e) => { busqueda = e.target.value; $('lista').innerHTML = lista(busqueda); });
       panel.addEventListener('click', async (e) => {
@@ -523,7 +536,7 @@ function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actua
 
     const pintarNuevo = (pre = {}, desdeLista = false) => {
       let confirmarFormato = false;
-      const panel = mostrarSheet(`${cabeceraSheet('Nuevo aviso')}
+      const panel = mostrarSheet(`${cabeceraSheet('Nuevo caso')}
         ${camposAviso(pre)}
         <p class="field" style="margin:0"><span class="err" data-s="err"></span></p>`, cancelar,
       '<button class="btn" data-s="cancelar">Cancelar</button><button class="btn primary" data-s="aceptar">Aceptar</button>');
@@ -573,16 +586,106 @@ function elegirAviso({ titulo = 'Elige el aviso', permitirNinguno = false, actua
   });
 }
 
+// ---------------------------------------------------------------------------
+// Casos: uso, días y pantalla de gestión
+// ---------------------------------------------------------------------------
+/** Por cada caso: días en que tiene horas, gastos o dietas, y el último. */
+function usoCasos() {
+  const m = new Map();
+  const add = (id, f) => {
+    if (!id) return;
+    let x = m.get(id);
+    if (!x) m.set(id, (x = { dias: new Set(), ultimo: '' }));
+    x.dias.add(f);
+    if (f > x.ultimo) x.ultimo = f;
+  };
+  for (const t of S.tramos) add(t.avisoId, t.fecha);
+  for (const g of S.gastos) add(g.avisoId, g.fecha);
+  for (const k of Object.keys(S.dietas)) add(k.slice(11), k.slice(0, 10));
+  return m;
+}
+function cuandoTxt(f) {
+  if (!f) return 'sin usar todavía';
+  const d = L.diasEntre(f, hoy());
+  if (d === 0) return 'usado hoy';
+  if (d === 1) return 'usado ayer';
+  return `usado el ${L.fechaCorta(f)}${f.slice(0, 4) !== hoy().slice(0, 4) ? ' ' + f.slice(0, 4) : ''}`;
+}
+/** Lista de días de un caso (para la ficha): horas, gastos y dietas de cada día. */
+function diasDeCasoHTML(id) {
+  const x = usoCasos().get(id);
+  if (!x) return '<div class="label-up">Días en que lo usaste</div><p class="small muted" style="margin:0">Aún no lo has usado en ningún día.</p>';
+  const dias = [...x.dias].sort().reverse();
+  const MAX = 60;
+  const filas = dias.slice(0, MAX).map((f) => {
+    const min = calcDia(f).segs.filter((sg) => sg.avisoId === id && L.llevaAviso(sg.tipo)).reduce((sum, sg) => sum + sg.fin - sg.ini, 0);
+    const ng = S.gastos.filter((g) => g.fecha === f && g.avisoId === id).length;
+    const dt = S.dietas[`${f}|${id}`];
+    const nd = dt ? L.DIETAS.filter((d) => dt[d.id]).length : 0;
+    const partes = [min ? `${L.fmtHM(min)} h` : '', ng ? `${ng} gasto${ng > 1 ? 's' : ''}` : '', nd ? `${nd} dieta${nd > 1 ? 's' : ''}` : ''].filter(Boolean).join(' · ');
+    return `<button data-s="dia" data-f="${f}"><span class="num" style="font-family:var(--sans)">${L.fechaLarga(f, true)}</span><span class="ob">${partes || 'Sin horas'}</span></button>`;
+  }).join('');
+  return `<div class="label-up">Días en que lo usaste (${dias.length})</div><div class="picklist">${filas}</div>${dias.length > MAX ? `<p class="small muted" style="margin:0">Y ${dias.length - MAX} días más antiguos.</p>` : ''}`;
+}
+
+const CS = { filtro: 'activos', q: '' };
+function listaCasos() {
+  const uso = usoCasos();
+  const nq = normTxt(CS.q);
+  const trozos = nq.split(' ').filter(Boolean);
+  const coincide = (...txts) => trozos.every((t) => txts.some((x) => normTxt(x).includes(t)));
+  if (CS.filtro === 'obras') {
+    const obras = S.obras.filter((o) => coincide(o.nombre))
+      .sort((x, y) => (x.archivada - y.archivada) || x.nombre.localeCompare(y.nombre, 'es'));
+    if (!obras.length) return `<div class="empty">${S.obras.length ? 'Ninguna obra coincide.' : 'Aún no tienes obras. Se crean al escribirlas en un caso.'}</div>`;
+    return obras.map((o) => {
+      const n = S.avisos.filter((a) => a.obraId === o.id && !a.archivado).length;
+      return `<button class="row btnrow" data-a="renombrarObra" data-id="${o.id}"><div class="grow"><div class="t1">${esc(o.nombre)}${o.archivada ? ' <span class="small muted">(archivada)</span>' : ''}</div><div class="t2">${n} caso${n === 1 ? '' : 's'} activo${n === 1 ? '' : 's'}</div></div>${CHEV}</button>`;
+    }).join('');
+  }
+  const base = S.avisos.filter((a) => (CS.filtro === 'archivados' ? a.archivado : !a.archivado && (CS.filtro !== 'sinnum' || !a.numero)));
+  const avs = base.filter((a) => coincide(a.numero, a.descripcion, obraPorId(a.obraId)?.nombre))
+    .sort((x, y) => (S.ajustes.usoAvisos[y.id] || 0) - (S.ajustes.usoAvisos[x.id] || 0) || ((uso.get(y.id)?.ultimo || '') > (uso.get(x.id)?.ultimo || '') ? 1 : -1));
+  if (!avs.length) {
+    const vacio = { activos: 'Aún no tienes casos. Pulsa «+ Nuevo» o elige uno al fichar.', sinnum: 'Todos tus casos tienen número.', archivados: 'No tienes casos archivados.' }[CS.filtro];
+    return `<div class="empty">${trozos.length && base.length ? 'Ningún caso coincide.' : vacio}</div>`;
+  }
+  return avs.map((a) => {
+    const u = uso.get(a.id);
+    const nd = u ? u.dias.size : 0;
+    const obra = obraPorId(a.obraId)?.nombre;
+    return `<button class="row btnrow" data-a="editarAviso" data-id="${a.id}"><div class="grow">
+      <div class="t1">${a.numero ? `<span class="mono">${esc(a.numero)}</span>` : SIN_NUM}${a.descripcion ? ` ${esc(a.descripcion)}` : ''}</div>
+      <div class="t2">${obra ? esc(obra) : 'Sin obra'} · ${cuandoTxt(u?.ultimo)}${nd ? ` · ${nd} día${nd > 1 ? 's' : ''}` : ''}</div></div>${CHEV}</button>`;
+  }).join('');
+}
+function vCasos() {
+  const activos = S.avisos.filter((a) => !a.archivado);
+  const n = { activos: activos.length, sinnum: activos.filter((a) => !a.numero).length, archivados: S.avisos.length - activos.length, obras: S.obras.length };
+  const filtros = [['activos', 'Activos'], ['sinnum', 'Sin número'], ['archivados', 'Archivados'], ['obras', 'Obras']];
+  const ayuda = CS.filtro === 'obras'
+    ? 'Toca una obra para cambiarle el nombre o archivarla (al archivarla se archivan también sus casos).'
+    : 'Toca un caso para completar el número, cambiar la descripción o la obra, archivarlo o ver los días en que lo usaste.';
+  return `${top({ titulo: 'Casos', derecha: '<button class="btn small primary" data-a="nuevoAviso">+ Nuevo</button>' })}
+  <main class="content">
+    <input class="input" type="search" id="casosQ" placeholder="Buscar número, descripción u obra" aria-label="Buscar caso u obra" autocomplete="off" value="${esc(CS.q)}">
+    <div class="pills">${filtros.map(([v, l]) => `<button class="pill" data-a="casosFiltro" data-v="${v}" aria-pressed="${CS.filtro === v}">${l} <span class="cnt">${n[v]}</span></button>`).join('')}</div>
+    <div class="card flush" id="casosLista">${listaCasos()}</div>
+    <p class="small muted" style="padding:0 4px">${ayuda}</p>
+  </main>`;
+}
+
 /** Modificar un aviso: completar el número, cambiar descripción u obra, archivarlo. */
 function editarAviso(id) {
   const a = avisoPorId(id);
   if (!a) return;
   let confirmarFormato = false;
-  const panel = mostrarSheet(`${cabeceraSheet(a.numero ? 'Aviso ' + a.numero : 'Aviso sin número')}
+  const panel = mostrarSheet(`${cabeceraSheet(a.numero ? 'Caso ' + a.numero : 'Caso sin número')}
     ${camposAviso({ num: a.numero, desc: a.descripcion, obraId: a.obraId || '' })}
     <p class="field" style="margin:0"><span class="err" data-s="err"></span></p>
-    <p class="small muted" style="margin:0">Los avisos archivados no salen al elegir aviso, pero sus horas y gastos se conservan.</p>`, null,
-  `<button class="btn" data-s="arch">${a.archivado ? 'Recuperar aviso' : 'Archivar aviso'}</button><button class="btn primary" data-s="ok">Guardar</button>`);
+    <p class="small muted" style="margin:0">Los casos archivados no salen al elegir caso, pero sus horas y gastos se conservan.</p>
+    ${diasDeCasoHTML(a.id)}`, null,
+  `<button class="btn" data-s="arch">${a.archivado ? 'Recuperar caso' : 'Archivar caso'}</button><button class="btn primary" data-s="ok">Guardar</button>`);
   const $ = (s) => panel.querySelector(`[data-s="${s}"]`);
   enlazarCamposAviso(panel, { avisoId: a.id, onNum: () => { confirmarFormato = false; $('err').textContent = ''; } });
   panel.addEventListener('click', async (e) => {
@@ -590,6 +693,11 @@ function editarAviso(id) {
     if (!b || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
     const s = b.dataset.s;
     if (s === 'x') return cancelarSheet();
+    if (s === 'dia') {
+      await cerrarSheet();
+      ir(`#/dia/${b.dataset.f}`);
+      return;
+    }
     if (s === 'arch') {
       a.archivado = !a.archivado;
       await cerrarSheet();
@@ -606,7 +714,7 @@ function editarAviso(id) {
       }
       const otro = r.num && S.avisos.find((x) => x.id !== a.id && x.numero === r.num);
       if (otro) {
-        if (!confirm(`Ya tienes el aviso ${r.num}. ¿Unir los dos? Las horas, dietas y gastos de este pasarán a ese.`)) return;
+        if (!confirm(`Ya tienes el caso ${r.num}. ¿Unir los dos? Las horas, dietas y gastos de este pasarán a ese.`)) return;
         if (!otro.descripcion && r.desc) otro.descripcion = r.desc;
         if (!otro.obraId && r.obraTxt) otro.obraId = obraDesdeTexto(r.obraTxt);
         otro.archivado = false;
@@ -618,7 +726,7 @@ function editarAviso(id) {
       }
       await cerrarSheet();
       commit();
-      toast('Aviso guardado');
+      toast('Caso guardado');
     }
   });
 }
@@ -655,7 +763,7 @@ const ACC = {
   async salirCasa() {
     if (abiertoAntiguo()) return;
     const ahora = L.ahoraMin();
-    const a = await elegirAviso({ titulo: '¿A qué aviso vas?' });
+    const a = await elegirAviso({ titulo: '¿A qué caso vas?' });
     if (a === undefined) return;
     abrirTramo('desplazamiento', a, ahora);
     commit();
@@ -663,7 +771,7 @@ const ACC = {
   async empezar() {
     if (abiertoAntiguo()) return;
     const ahora = L.ahoraMin();
-    const a = await elegirAviso({ titulo: '¿En qué aviso trabajas?' });
+    const a = await elegirAviso({ titulo: '¿En qué caso trabajas?' });
     if (a === undefined) return;
     abrirTramo('trabajo', a, ahora);
     commit();
@@ -693,7 +801,7 @@ const ACC = {
   },
   async cambioAviso() {
     const ahora = L.ahoraMin();
-    const a = await elegirAviso({ titulo: '¿A qué aviso cambias?', actual: tramoAbierto()?.avisoId });
+    const a = await elegirAviso({ titulo: '¿A qué caso cambias?', actual: tramoAbierto()?.avisoId });
     if (a === undefined) return;
     cerrarAbierto(ahora);
     abrirTramo('trabajo', a, ahora);
@@ -703,12 +811,12 @@ const ACC = {
     const ahora = L.ahoraMin();
     const op = await elegirOpcion('¿A dónde vas?', [
       { v: 'casa', l: 'Vuelvo a casa o al hotel' },
-      { v: 'otro', l: 'Voy a otro aviso' },
+      { v: 'otro', l: 'Voy a otro caso' },
     ]);
     if (op === undefined) return;
     let aviso = tramoAbierto()?.avisoId;
     if (op === 'otro') {
-      const a = await elegirAviso({ titulo: '¿A qué aviso vas?' });
+      const a = await elegirAviso({ titulo: '¿A qué caso vas?' });
       if (a === undefined) return;
       aviso = a;
     }
@@ -763,7 +871,7 @@ const ACC = {
   nuevoGasto(d) { editarGasto(null, d.f, d.aviso || null); },
   editGasto(d) { editarGasto(d.id); },
   async avisoGastos(d) {
-    const a = await elegirAviso({ titulo: 'Añadir aviso a este día' });
+    const a = await elegirAviso({ titulo: 'Añadir caso a este día' });
     if (!a) return;
     const x = dia(d.f);
     x.avisosGasto = [...new Set([...(x.avisosGasto || []), a])];
@@ -809,10 +917,37 @@ const ACC = {
   },
   editarAviso(d) { editarAviso(d.id); },
   async nuevoAviso() {
-    const a = await elegirAviso({ titulo: 'Nuevo aviso', soloNuevo: true });
-    if (a) { commit(); toast('Aviso creado'); }
+    const a = await elegirAviso({ titulo: 'Nuevo caso', soloNuevo: true });
+    if (a) { commit(); toast('Caso creado'); }
   },
-  verArchivados() { verArchivados = !verArchivados; render(); },
+  casosFiltro(d) { CS.filtro = d.v; render(); },
+  // Coche eléctrico
+  cocheActivar() {
+    const c = S.ajustes.coche;
+    c.activo = !c.activo;
+    commit();
+    toast(c.activo ? 'Activado: lo tienes en el botón del rayo, arriba en Hoy' : 'Apagado. Las cargas siguen guardadas.');
+  },
+  nuevaCarga() { editarCarga(null); },
+  editCarga(d) { editarCarga(d.id); },
+  cocheModo(d) { CO.modo = d.v; render(); },
+  cocheMover(d) {
+    const [y, m] = (CO.ref || hoy()).split('-').map(Number);
+    CO.ref = L.fmtFecha(new Date(y, m - 1 + +d.v, 1));
+    render();
+  },
+  cocheHoy() { CO.ref = null; render(); },
+  cerrarRec(d) {
+    // Solo se recuerdan los tramos que siguen abiertos
+    S.ajustes.recCerrados = S.ajustes.recCerrados.filter((id) => S.tramos.some((t) => t.id === id && t.fin == null));
+    S.ajustes.recCerrados.push(d.id);
+    commit();
+  },
+  recOn(d) {
+    const c = S.ajustes.recordatorios[d.k];
+    c.on = !c.on;
+    commit();
+  },
   async copiaDescargar() { await hacerCopia(); },
 };
 
@@ -860,8 +995,8 @@ function editarTramo(id, fechaNueva, pre = null) {
       <div class="grid2">${L.TIPOS.filter((t) => t.id !== 'comida').map((t) => btnModo(t.id, t.label)).join('')}</div>
       <div class="label-up">Si sale extra, ¿cómo la compensas?</div>
       <div class="segm small">${Object.keys(L.COMP).map((c) => `<button data-s="comp" data-v="${c}" aria-pressed="${tmp.comp === c}">${L.COMP[c]}</button>`).join('')}</div>
-      ${tmp.tipo && !L.llevaAviso(tmp.tipo) ? '<p class="small muted" style="margin:0">Este tipo de hora no lleva aviso ni obra.</p>' : `<div class="label-up">Aviso</div>
-      <button class="choice" data-s="aviso">${tmp.avisoId ? avisoHTML(tmp.avisoId) : '<span class="muted">Sin aviso · tocar para elegir</span>'}</button>`}
+      ${tmp.tipo && !L.llevaAviso(tmp.tipo) ? '<p class="small muted" style="margin:0">Este tipo de hora no lleva caso ni obra.</p>' : `<div class="label-up">Caso</div>
+      <button class="choice" data-s="aviso">${tmp.avisoId ? avisoHTML(tmp.avisoId) : '<span class="muted">Sin caso · tocar para elegir</span>'}</button>`}
       <label class="field">Comentario<textarea data-s="com" rows="2">${esc(tmp.comentario)}</textarea></label>
       <p class="field"><span class="err" data-s="err"></span></p>
       <div class="grid2">${t0 ? '<button class="btn danger" data-s="del">Eliminar</button>' : '<span></span>'}<button class="btn primary" data-s="ok">Guardar</button></div>`);
@@ -897,7 +1032,7 @@ function editarTramo(id, fechaNueva, pre = null) {
     }
     if (s === 'aviso') {
       leer();
-      const a = await elegirAviso({ titulo: 'Aviso del tramo', permitirNinguno: true, actual: tmp.avisoId });
+      const a = await elegirAviso({ titulo: 'Caso del tramo', permitirNinguno: true, actual: tmp.avisoId });
       if (a !== undefined) tmp.avisoId = a;
       pintar();
       return;
@@ -1011,10 +1146,10 @@ function editarGasto(id, fecha, avisoId) {
     const km = tmp.cat === 'Kilómetros';
     panel = mostrarSheet(`${cabeceraSheet(g0 ? 'Modificar gasto' : 'Nuevo gasto')}
       <div class="small muted">${L.fechaLarga(tmp.fecha, true)}</div>
-      <button class="choice" data-s="aviso">${tmp.avisoId ? avisoHTML(tmp.avisoId) : '<span class="muted">Elegir aviso</span>'}</button>
+      <button class="choice" data-s="aviso">${tmp.avisoId ? avisoHTML(tmp.avisoId) : '<span class="muted">Elegir caso</span>'}</button>
       <div class="grid3">${L.CATEGORIAS_GASTO.map((c) => `<button class="choice" style="text-align:center;padding:0 4px" data-s="cat" data-v="${c}" aria-pressed="${tmp.cat === c}">${c}</button>`).join('')}</div>
       ${km
-        ? `<label class="field">Kilómetros<input class="mono" data-s="km" inputmode="decimal" value="${tmp.km ?? ''}" placeholder="0"></label>`
+        ? `<label class="field">Kilómetros<input class="mono" data-s="km" inputmode="decimal" value="${tmp.km ?? ''}" placeholder="0">${S.ajustes.coche.activo ? '<span class="help">Cuentan como km de trabajo del coche eléctrico.</span>' : ''}</label>`
         : `<label class="field">Importe (€)<input class="mono" data-s="importe" inputmode="decimal" value="${tmp.importe != null ? String(tmp.importe).replace('.', ',') : ''}" placeholder="0,00"></label>`}
       <label class="field">Detalle<input data-s="detalle" value="${esc(tmp.detalle)}" placeholder="${km ? 'Casa → cliente' : 'Opcional'}"></label>
       <div class="label-up">Ticket o factura</div>
@@ -1054,7 +1189,7 @@ function editarGasto(id, fecha, avisoId) {
       leer();
       const prevCancel = sheetCancel;
       sheetCancel = null;
-      const a = await elegirAviso({ titulo: 'Aviso del gasto', actual: tmp.avisoId });
+      const a = await elegirAviso({ titulo: 'Caso del gasto', actual: tmp.avisoId });
       if (a) tmp.avisoId = a;
       pintar();
       sheetCancel = prevCancel || sheetCancel;
@@ -1086,7 +1221,7 @@ function editarGasto(id, fecha, avisoId) {
     }
     if (s === 'ok') {
       leer();
-      if (!tmp.avisoId) return err('Elige el aviso al que va el gasto.');
+      if (!tmp.avisoId) return err('Elige el caso al que va el gasto.');
       if (tmp.cat === 'Kilómetros') {
         if (!(tmp.km > 0)) return err('Pon los kilómetros.');
         tmp.importe = null;
@@ -1174,16 +1309,17 @@ function vHoy() {
   const sem = resumen(L.diasSemana(f));
   const mes = resumen(L.diasMes(f));
   let avisos = '';
+  const rec = L.recordatorio(ab, { hoy: f, ahora: L.ahoraMin(), conf: S.ajustes.recordatorios });
+  if (rec && !S.ajustes.recCerrados.includes(ab.id)) {
+    const r = L.RECORDATORIOS.find((x) => x.id === rec.id);
+    avisos += `<div class="warn recordatorio" role="status"><span class="grow"><b>${esc(r.texto)}</b>: llevas ${L.fmtHM(rec.min)}, desde las ${L.fmtHora(ab.ini)}.</span><button class="iconbtn plain" data-a="cerrarRec" data-id="${ab.id}" aria-label="Cerrar aviso">${IC.x}</button></div>`;
+  }
   if (ab && ab.fecha !== f) {
     avisos += `<div class="warn">Tienes un tramo sin cerrar del ${L.fechaLarga(ab.fecha)} desde las ${L.fmtHora(ab.ini)}. <button class="linkbtn" data-a="editTramo" data-id="${ab.id}">Cerrarlo</button></div>`;
   }
   const uc = S.ajustes.ultimaCopia;
   if (S.tramos.length > 3 && (!uc || L.diasEntre(uc, f) >= 7)) {
     avisos += `<div class="warn">${uc ? `Tu última copia de seguridad es del ${L.fechaCorta(uc)}.` : 'Aún no has hecho ninguna copia de seguridad.'} <a class="linkbtn" href="#/ajustes">Hacer copia</a></div>`;
-  }
-  const sinNum = avisosSinNumero();
-  if (sinNum.length) {
-    avisos += `<div class="warn">${sinNum.length > 1 ? 'Avisos' : 'Aviso'} pendiente${sinNum.length > 1 ? 's' : ''} de número: ${sinNum.map((a) => `<button class="linkbtn" data-a="editarAviso" data-id="${a.id}">${esc(a.descripcion || obraPorId(a.obraId)?.nombre || 'sin descripción')}</button>`).join(' ')}</div>`;
   }
   if (!S.inicial) {
     avisos += `<div class="note">Para que las bolsas de prolongación y extras cuadren, mete en Ajustes lo que ya llevabas acumulado este año. <a href="#/ajustes">Ir a Ajustes</a></div>`;
@@ -1197,20 +1333,20 @@ function vHoy() {
     if (ab.clase === 'desplazamiento' && !ab.tipo && tipo !== 'desplazamiento') etiqueta = `Viaje · ${etiqueta}`;
     let botones;
     if (ab.clase === 'desplazamiento') {
-      botones = `<button class="btn primary span2" data-a="llegoCliente">Llego al aviso</button>
+      botones = `<button class="btn primary span2" data-a="llegoCliente">Llego al caso</button>
         <button class="btn" data-a="terminar">Llego a casa</button><button class="btn" data-a="comer">Paro a comer</button>`;
     } else if (ab.clase === 'comida') {
       botones = `<button class="btn primary span2" data-a="volver">Vuelvo al trabajo</button><button class="btn span2" data-a="terminar">Termino la jornada</button>`;
     } else {
-      botones = `<button class="btn primary span2" data-a="salgoCliente">Salgo del aviso</button>
-        <button class="btn" data-a="comer">Paro a comer</button><button class="btn" data-a="cambioAviso">Cambio de aviso</button>
+      botones = `<button class="btn primary span2" data-a="salgoCliente">Salgo del caso</button>
+        <button class="btn" data-a="comer">Paro a comer</button><button class="btn" data-a="cambioAviso">Cambio de caso</button>
         <button class="btn span2" data-a="terminar">Termino aquí (sin viaje)</button>`;
     }
     const i = infoAviso(ab.avisoId);
     hero = `<section class="hero">
       <div class="hrow"><span class="chip t-${tipo}">${esc(etiqueta)} · en curso</span><span class="since">desde ${L.fmtHora(ab.ini)}</span></div>
       <div class="timer">${L.fmtHM(L.ahoraMin() - ab.ini)}</div>
-      ${ab.clase !== 'comida' ? `<div class="who">${i ? `<div class="since">${i.num ? `Aviso <span class="num">${esc(i.num)}</span>` : 'Aviso todavía sin número'}</div><div class="obra">${esc(i.texto)}</div>` : '<div class="obra">Sin aviso</div>'}</div>` : ''}
+      ${ab.clase !== 'comida' ? `<div class="who">${i ? `<div class="since">${i.num ? `Caso <span class="num">${esc(i.num)}</span>` : 'Caso todavía sin número'}</div><div class="obra">${esc(i.texto)}</div>` : '<div class="obra">Sin caso</div>'}</div>` : ''}
       <div class="grid2">${botones}</div>
     </section>`;
   } else {
@@ -1246,7 +1382,7 @@ function vHoy() {
   return `${top({
     kicker: `Semana ${L.semanaISO(f)} · ${L.esVerano(f) ? 'Horario de verano' : 'Horario de invierno'}${fs.has(f) ? ' · Festivo' : ''}`,
     titulo: L.fechaLarga(f),
-    derecha: `<a class="iconbtn" href="#/ajustes" aria-label="Ajustes">${IC.ajustes}</a>`,
+    derecha: `${S.ajustes.coche.activo ? `<a class="iconbtn" href="#/coche" aria-label="Coche eléctrico">${IC.rayo}</a>` : ''}<a class="iconbtn" href="#/ajustes" aria-label="Ajustes">${IC.ajustes}</a>`,
   })}
   <main class="content">
     ${avisos}${hero}${contadores}
@@ -1284,7 +1420,7 @@ function vDia(f) {
       <button class="btn small" data-a="objetivo" data-f="${f}">Cambiar</button>
     </section>
     ${warns.map((w) => `<div class="warn">${esc(w)}</div>`).join('')}
-    ${d.segs.length ? '<div class="note">Toca el tipo de un tramo para cambiarlo, o el lápiz para cambiar horas, fecha o aviso.</div>' : ''}
+    ${d.segs.length ? '<div class="note">Toca el tipo de un tramo para cambiarlo, o el lápiz para cambiar horas, fecha o caso.</div>' : ''}
     <div class="card flush">${segs || sinFin ? segs + sinFin : '<div class="empty">No hay tramos este día.</div>'}</div>
     <div class="grid2">
       <button class="btn dashed" data-a="nuevoTramo" data-fecha="${f}">+ Añadir tramo</button>
@@ -1338,8 +1474,8 @@ function vGastos(f) {
   return `${top({ kicker: 'Gastos', titulo: L.fechaLarga(f), derecha: `<a class="iconbtn" href="#/gastos/${L.addDias(f, -1)}" aria-label="Día anterior">${IC.atras}</a><a class="iconbtn" href="#/gastos/${L.addDias(f, 1)}" aria-label="Día siguiente">${IC.sig}</a>` })}
   <main class="content">
     <div class="sec-title"><span class="small muted">Km del día: <b class="mono">${numES(km)} km</b></span>${f !== hoy() ? `<a class="linkbtn" href="#/gastos/${hoy()}">Ir a hoy</a>` : ''}</div>
-    ${tarjetas || '<div class="card"><p class="muted">Este día no tiene avisos. Elige uno para apuntar dietas o gastos.</p></div>'}
-    <button class="btn dashed" data-a="avisoGastos" data-f="${f}">+ Añadir otro aviso a este día</button>
+    ${tarjetas || '<div class="card"><p class="muted">Este día no tiene casos. Elige uno para apuntar dietas o gastos.</p></div>'}
+    <button class="btn dashed" data-a="avisoGastos" data-f="${f}">+ Añadir otro caso a este día</button>
     <a class="btn" href="#/dia/${f}">Ver horas de este día</a>
   </main>`;
 }
@@ -1397,7 +1533,7 @@ function bloqueGastos(f, soloAviso) {
   if (!partes.length) return '';
   return `<a class="gblock" href="#/gastos/${f}"><div class="label-up">Gastos</div>${partes.join('')}</a>`;
 }
-const cabeceraCols = (c2 = 'Tipo · aviso', acum = true) => `<div class="rrow rhead${acum ? '' : ' sin-acum'}"><span>Horario</span><span>${c2}</span><span class="r">Horas</span>${acum ? '<span class="r">Acum.</span>' : ''}</div>`;
+const cabeceraCols = (c2 = 'Tipo · caso', acum = true) => `<div class="rrow rhead${acum ? '' : ' sin-acum'}"><span>Horario</span><span>${c2}</span><span class="r">Horas</span>${acum ? '<span class="r">Acum.</span>' : ''}</div>`;
 
 function vResumen() {
   const p = periodo();
@@ -1458,7 +1594,7 @@ function vResumen() {
         return `<div class="subband">${L.fechaLarga(f)}</div>${filas}${bloqueGastos(f, id)}`;
       }).join('');
       return `<section class="card flush daycard">
-        <div class="dayband"><span class="grow"><b>${id ? avisoHTML(id) : 'Sin aviso'}</b></span>${id && !avisoPorId(id)?.numero ? `<button class="btn small" data-a="editarAviso" data-id="${id}">Completar</button>` : ''}</div>
+        <div class="dayband"><span class="grow"><b>${id ? avisoHTML(id) : 'Sin caso'}</b></span>${id && !avisoPorId(id)?.numero ? `<button class="btn small" data-a="editarAviso" data-id="${id}">Completar</button>` : ''}</div>
         ${Object.keys(tot).length ? `<div class="pills" style="padding:8px 14px">${Object.entries(tot).map(([t, m]) => chip(t, ` ${L.fmtHM(m)}`)).join('')}</div>` : ''}
         ${cuerpo}
       </section>`;
@@ -1506,7 +1642,7 @@ function vResumen() {
       </div>
       ${resumenGastos ? `<div class="small muted" style="border-top:1px solid var(--line-soft);padding-top:8px">Gastos: ${resumenGastos}</div>` : ''}
     </section>
-    <div class="pills"><span class="small muted">Ver por</span>${[['dia', 'Día'], ['aviso', 'Aviso'], ['tipo', 'Tipo de hora']].map(([v, l]) => `<button class="pill" data-a="resVista" data-v="${v}" aria-pressed="${R.vista === v}">${l}</button>`).join('')}</div>
+    <div class="pills"><span class="small muted">Ver por</span>${[['dia', 'Día'], ['aviso', 'Caso'], ['tipo', 'Tipo de hora']].map(([v, l]) => `<button class="pill" data-a="resVista" data-v="${v}" aria-pressed="${R.vista === v}">${l}</button>`).join('')}</div>
     ${lista || '<div class="card"><p class="muted">No hay horas ni gastos en este periodo.</p></div>'}
     <div class="grid3">
       <button class="btn" data-a="exportExcel">Excel</button>
@@ -1555,7 +1691,6 @@ function vBolsas() {
   </main>`;
 }
 
-let verArchivados = false;
 function mesesSaldo(fecha) {
   const [y, m] = (fecha || hoy()).split('-').map(Number);
   return [2, 1, 0].map((k) => L.fmtFecha(new Date(y, m - 1 - k, 1)).slice(0, 7));
@@ -1566,7 +1701,6 @@ function vAjustes() {
   const lote = (mes) => (ini.prolLotes || []).find((l) => l.mes === mes)?.min;
   const hm = (v) => (v == null ? '' : L.fmtHM(v).replace('−', '-'));
   const festivos = S.festivos.filter((f) => f >= `${Number(hoy().slice(0, 4)) - 1}-01-01`);
-  const obras = S.obras.filter((o) => verArchivados || !o.archivada);
   return `${top({ titulo: 'Ajustes', atras: true })}
   <main class="content">
     <section class="card">
@@ -1601,17 +1735,22 @@ function vAjustes() {
     </section>
 
     <section class="card">
-      <h2>Obras y avisos</h2>
-      <p class="small muted">Toca un aviso para completar su número, cambiar la descripción o la obra, o archivarlo.</p>
-      ${[...obras.map((o) => ({ o, avs: S.avisos.filter((a) => a.obraId === o.id) })), { o: null, avs: S.avisos.filter((a) => !a.obraId || !obraPorId(a.obraId)) }].map(({ o, avs }) => {
-        avs = avs.filter((a) => verArchivados || !a.archivado);
-        if (!o && !avs.length) return '';
-        return `<div style="border-top:1px solid var(--line-soft);padding-top:8px">
-          <div style="display:flex;align-items:center;gap:8px"><div class="grow" style="flex:1;font-weight:600">${o ? esc(o.nombre) : '<span class="muted">Sin obra</span>'}${o?.archivada ? ' <span class="small muted">(archivada)</span>' : ''}</div>${o ? `<button class="linkbtn" data-a="renombrarObra" data-id="${o.id}">Editar</button>` : ''}</div>
-          <div class="pills" style="margin-top:4px">${avs.map((a) => `<button class="pill" data-a="editarAviso" data-id="${a.id}" style="${a.archivado ? 'opacity:.55' : ''}">${a.numero ? `<span class="mono">${esc(a.numero)}</span>` : SIN_NUM}${a.descripcion ? ` ${esc(a.descripcion)}` : ''}</button>`).join('') || '<span class="small muted">Sin avisos</span>'}</div>
-        </div>`;
-      }).join('') || '<span class="small muted">Aún no tienes avisos. Se crean al elegir aviso por primera vez.</span>'}
-      <div class="grid2"><button class="btn" data-a="nuevoAviso">+ Nuevo aviso</button><button class="btn" data-a="verArchivados">${verArchivados ? 'Ocultar archivados' : 'Ver archivados'}</button></div>
+      <h2>Recordatorios</h2>
+      <p class="small muted">Si un tramo sigue abierto más de este tiempo, sale un aviso arriba en Hoy (lo cierras con la X). Solo se ve con la app abierta: el móvil no puede avisarte con la app cerrada.</p>
+      ${L.RECORDATORIOS.map((r) => {
+        const c = S.ajustes.recordatorios[r.id];
+        return `<div class="recrow"><div class="grow"><div class="t1">${esc(r.label)}</div><div class="small muted">abierto más de</div></div>
+        <input class="input mono" data-campo="recMin" data-k="${r.id}" value="${L.fmtHM(c.min)}" aria-label="${esc(r.label)}: tiempo" autocomplete="off">
+        <button class="toggle" data-a="recOn" data-k="${r.id}" aria-pressed="${c.on}">${c.on ? 'Activado' : 'Apagado'}</button></div>`;
+      }).join('')}
+    </section>
+
+    <section class="card">
+      <h2>Coche eléctrico</h2>
+      <p class="small muted">Apunta las cargas y lo que marca el cuentakilómetros para saber lo que te cuesta cada km según dónde cargas. Los km de trabajo salen de los gastos de Kilómetros de tus casos. Si lo apagas no se borra nada.</p>
+      <button class="btn${S.ajustes.coche.activo ? '' : ' primary'}" data-a="cocheActivar">${S.ajustes.coche.activo ? 'Apagar el coche eléctrico' : 'Activar el coche eléctrico'}</button>
+      ${S.ajustes.coche.activo ? `<label class="field"><span>Precio del kWh en casa <span class="opc">(opcional)</span></span><input class="mono" data-campo="precioCasa" inputmode="decimal" value="${numIn(S.ajustes.coche.precioCasa)}" placeholder="0,00" autocomplete="off"><span class="help">En €/kWh. Si lo pones, el coste de las cargas en casa se calcula solo con los kWh (lo puedes cambiar en cada carga).</span></label>
+      <label class="field"><span>Lo que te paga la empresa por km <span class="opc">(opcional)</span></span><input class="mono" data-campo="pagoKm" inputmode="decimal" value="${numIn(S.ajustes.coche.pagoKm)}" placeholder="0,00" autocomplete="off"><span class="help">En €/km. Para compararlo con lo que te cuesta.</span></label>` : ''}
     </section>
 
     <section class="card">
@@ -1649,6 +1788,219 @@ function guardarSaldos() {
 }
 
 // ---------------------------------------------------------------------------
+// Coche eléctrico (v1.3): cargas y coste por km
+// ---------------------------------------------------------------------------
+const CO = { modo: 'mes', ref: null };
+const kmTrabajoCoche = () => S.gastos.filter((g) => g.cat === 'Kilómetros' && g.km > 0).map((g) => ({ fecha: g.fecha, km: g.km }));
+const ordenCarga = (a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : (a.odo ?? Infinity) - (b.odo ?? Infinity));
+/** La última lectura del cuentakilómetros hasta esa fecha (sin contar la carga `sinId`). */
+function lecturaAnterior(fecha, sinId) {
+  return S.cargas.filter((c) => c.id !== sinId && c.odo != null && c.fecha <= fecha).sort(ordenCarga).at(-1) || null;
+}
+
+function vCoche() {
+  const conf = S.ajustes.coche;
+  if (!conf.activo) {
+    return `${top({ titulo: 'Coche eléctrico', atras: true })}
+    <main class="content"><section class="card"><p>La parte del coche eléctrico está apagada.</p><a class="btn" href="#/ajustes">Activarla en Ajustes</a></section></main>`;
+  }
+  const ref = CO.ref || hoy();
+  const mes = ref.slice(0, 7);
+  const enMes = CO.modo === 'mes';
+  const rango = enMes ? { desde: `${mes}-01`, hasta: L.diasMes(ref).at(-1) } : {};
+  const c = L.cuentasCoche(S.cargas, kmTrabajoCoche(), rango);
+  const kmPrev = new Map(L.usosCoche(S.cargas).map((u) => [u.id, u.km]));
+  const lista = S.cargas.filter((x) => (!rango.desde || x.fecha >= rango.desde) && (!rango.hasta || x.fecha <= rango.hasta)).sort(ordenCarga).reverse();
+  const cuando = enMes ? (mes === hoy().slice(0, 7) ? 'este mes' : `en ${L.mesLargo(mes)}`) : 'desde el principio';
+  const hayLecturas = S.cargas.some((x) => x.odo != null);
+
+  const coste = c.eurKm != null
+    ? `<div class="bigline"><span class="big">${fmtN(c.eurKm * 100, 2)} €</span><span class="small muted">cada 100 km</span></div>
+      <div class="small muted">${fmtP(c.eurKm)} €/km · consumo ${fmtN(c.consumo, 1)} kWh cada 100 km</div>`
+    : `<p class="small muted">${!hayLecturas ? 'Apunta el cuentakilómetros en cada carga: con dos lecturas ya se puede calcular.' : enMes ? 'Este mes todavía no hay dos cargas con el cuentakilómetros apuntado. Mira «Desde el principio».' : 'Hace falta otra carga con el cuentakilómetros apuntado.'}</p>`;
+
+  let empresa;
+  if (conf.pagoKm == null) {
+    empresa = '<div class="note">Si pones en Ajustes lo que te paga la empresa por km, aquí lo verás comparado con lo que te cuesta. <a href="#/ajustes">Ir a Ajustes</a></div>';
+  } else {
+    empresa = `<section class="card">
+      <h2>Lo que te paga la empresa</h2>
+      <div class="tots">
+        <div><div class="k">Te paga</div><div class="v">${fmtP(conf.pagoKm)}</div><div class="h">€ por km</div></div>
+        <div><div class="k">Te cuesta</div><div class="v">${c.eurKm != null ? fmtP(c.eurKm) : '—'}</div><div class="h">€ por km ${cuando}</div></div>
+      </div>
+      ${c.kmTrabajo ? `<p class="small">Por tus ${kmTxt(c.kmTrabajo)} km de trabajo ${cuando}: te pagan <b class="mono">${euros(c.kmTrabajo * conf.pagoKm)}</b>${c.eurKm != null ? ` y te cuestan <b class="mono">${euros(c.kmTrabajo * c.eurKm)}</b>` : ''}.</p>` : ''}
+    </section>`;
+  }
+
+  const tipos = L.TIPOS_CARGA.filter((t) => c.porTipo[t.id]).map((t) => {
+    const x = c.porTipo[t.id];
+    return `<div class="row" style="padding:8px 0"><div class="grow"><div class="t1">${esc(t.label)} <span class="small muted">· ${Math.round(x.pct * 100)} % de lo cargado</span></div>
+      <div class="t2">${x.eurKwh != null ? `${fmtP(x.eurKwh)} €/kWh` : 'sin kWh'} · ${x.cargas} carga${x.cargas > 1 ? 's' : ''}</div></div>
+      <div style="text-align:right"><div class="mono" style="font-weight:600">${x.eur100 != null ? `${fmtN(x.eur100, 2)} €` : '—'}</div><div class="small muted">cada 100 km</div></div></div>`;
+  }).join('');
+
+  const filas = lista.map((x) => {
+    const lect = x.odo != null ? `${kmTxt(x.odo)} km${kmPrev.has(x.id) ? ` (+${kmTxt(kmPrev.get(x.id))})` : ''}` : 'sin cuentakilómetros';
+    return `<button class="row btnrow" data-a="editCarga" data-id="${x.id}"><div class="grow">
+      <div class="t1">${L.fechaCorta(x.fecha)} · ${esc(L.TIPO_CARGA[x.tipo]?.label || x.tipo)}${x.empresa ? ` · ${esc(x.empresa)}` : ''}</div>
+      <div class="t2">${numES(x.kwh)} kWh · ${lect}${x.nota ? ` · ${esc(x.nota)}` : ''}</div></div>
+      <div style="text-align:right;flex:none"><div class="mono" style="font-weight:600">${euros(x.importe)}</div>${x.kwh > 0 ? `<div class="small muted mono">${fmtP(x.importe / x.kwh)} €/kWh</div>` : ''}</div></button>`;
+  }).join('');
+
+  return `${top({ kicker: 'Coche eléctrico', titulo: enMes ? L.nombreMes(mes) : 'Desde el principio', atras: true, derecha: '<button class="btn small primary" data-a="nuevaCarga">+ Carga</button>' })}
+  <main class="content">
+    <div class="segm">${[['mes', 'Mes'], ['todo', 'Desde el principio']].map(([v, l]) => `<button data-a="cocheModo" data-v="${v}" aria-pressed="${CO.modo === v}">${l}</button>`).join('')}</div>
+    ${enMes ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <button class="iconbtn" data-a="cocheMover" data-v="-1" aria-label="Mes anterior">${IC.atras}</button>
+      <button class="linkbtn" data-a="cocheHoy" style="color:var(--ink)"><b style="font-size:16px">${L.nombreMes(mes)}</b></button>
+      <button class="iconbtn" data-a="cocheMover" data-v="1" aria-label="Mes siguiente">${IC.sig}</button>
+    </div>` : ''}
+    <section class="card">
+      <h2>Lo que te cuesta</h2>
+      ${coste}
+      <div class="stats3">
+        <div><div class="k">Km recorridos</div><div class="v">${kmTxt(c.km)}</div></div>
+        <div><div class="k">De trabajo</div><div class="v">${kmTxt(c.kmTrabajo)}</div></div>
+        <div><div class="k">Personales</div><div class="v">${kmTxt(c.kmPersonal)}</div></div>
+      </div>
+      ${c.trabajoSupera ? '<div class="note">Los km de trabajo de tus casos son más que los del cuentakilómetros: las lecturas no caen justo al empezar y acabar el mes. «Desde el principio» lo cuadra.</div>' : ''}
+      <p class="small muted">Los km de trabajo son los de los gastos de Kilómetros de tus casos; los personales, el resto.${c.ultimaLectura && c.km ? ` Cuenta hasta la última carga con cuentakilómetros (${L.fechaCorta(c.ultimaLectura)}).` : ''}</p>
+      <div class="stats3">
+        <div><div class="k">Pagado en cargas</div><div class="v">${euros(c.pagado)}</div></div>
+        <div><div class="k">Cargado</div><div class="v">${numES(Math.round(c.kwh * 10) / 10)} kWh</div></div>
+        <div><div class="k">Precio medio</div><div class="v">${c.kwh > 0 ? fmtP(c.pagado / c.kwh) : '—'}</div><div class="small muted">€/kWh</div></div>
+      </div>
+    </section>
+    ${empresa}
+    ${tipos ? `<section class="card"><h2>Según dónde cargas</h2><p class="small muted">Lo que te costarían 100 km si cargaras siempre en cada sitio, con tu consumo real.</p><div>${tipos}</div></section>` : ''}
+    <div class="sec-title"><h2>Cargas ${cuando}</h2></div>
+    <div class="card flush">${filas || '<div class="empty">No hay cargas en este periodo. Pulsa «+ Carga».</div>'}</div>
+    <div class="note">Cómo se calcula: la energía de cada carga se gasta en los km que haces después, así que el coste por km sale de lo cargado entre una lectura del cuentakilómetros y la siguiente. Las primeras semanas el número se mueve mucho; con más cargas se estabiliza.</div>
+  </main>`;
+}
+
+function editarCarga(id) {
+  const c0 = id ? S.cargas.find((c) => c.id === id) : null;
+  if (id && !c0) return;
+  const conf = S.ajustes.coche;
+  const tmp = c0 ? { ...c0 } : { id: uid(), fecha: hoy(), tipo: S.cargas.slice().sort(ordenCarga).at(-1)?.tipo || 'casa', empresa: '', kwh: null, importe: null, odo: null, nota: '' };
+  let importeAuto = !c0; // con el precio de casa, el coste se rellena solo hasta que lo toques
+  let autoPuesto = false;
+  let confirmar = '';
+  const panel = mostrarSheet(`${cabeceraSheet(c0 ? 'Modificar carga' : 'Nueva carga')}
+    <label class="field">Fecha<input type="date" data-s="fecha" value="${tmp.fecha}"></label>
+    <div class="field"><span>Dónde</span><div class="segm">${L.TIPOS_CARGA.map((t) => `<button type="button" data-s="tipo" data-v="${t.id}" aria-pressed="${tmp.tipo === t.id}">${t.label}</button>`).join('')}</div></div>
+    <label class="field"><span>Empresa o servicio <span class="opc">(opcional)</span></span><input data-s="empresa" value="${esc(tmp.empresa)}" placeholder="La electrolinera o la app que usaste" autocomplete="off" enterkeyhint="next"></label>
+    <div class="sugs" data-s="sugs"></div>
+    <div class="grid2">
+      <label class="field">kWh cargados<input class="mono" data-s="kwh" inputmode="decimal" value="${numIn(tmp.kwh)}" placeholder="0,0" autocomplete="off"></label>
+      <label class="field">Coste (€)<input class="mono" data-s="importe" inputmode="decimal" value="${numIn(tmp.importe)}" placeholder="0,00" autocomplete="off"></label>
+    </div>
+    <span class="help-l" data-s="precio"></span>
+    <label class="field">Cuentakilómetros del coche<input class="mono" data-s="odo" inputmode="numeric" value="${tmp.odo ?? ''}" placeholder="Km que marca el coche" autocomplete="off"><span class="help" data-s="odoInfo"></span></label>
+    <label class="field"><span>Nota <span class="opc">(opcional)</span></span><input data-s="nota" value="${esc(tmp.nota)}" autocomplete="off"></label>
+    <p class="field" style="margin:0"><span class="err" data-s="err"></span></p>`, null,
+  `${c0 ? '<button class="btn danger" data-s="del">Eliminar</button>' : '<button class="btn" data-s="cancelar">Cancelar</button>'}<button class="btn primary" data-s="ok">Guardar</button>`);
+  const q = (k) => panel.querySelector(`[data-s="${k}"]`);
+  const err = (m) => { q('err').textContent = m; };
+  const leerOdo = () => {
+    const t = q('odo').value.replace(/[.\s]/g, '').replace(',', '.');
+    return t === '' ? null : Math.round(Number(t));
+  };
+  const precioInfo = () => {
+    const kwh = parseNum(q('kwh').value), imp = parseNum(q('importe').value);
+    let t = '';
+    if (autoPuesto) t = `Calculado con tu precio de casa (${fmtP(conf.precioCasa)} €/kWh). Puedes cambiarlo.`;
+    else if (kwh > 0 && imp != null && !Number.isNaN(imp)) t = `= ${fmtP(imp / kwh)} €/kWh`;
+    q('precio').textContent = t;
+  };
+  const autoImporte = () => {
+    if (!importeAuto) return;
+    if (tmp.tipo === 'casa' && conf.precioCasa != null) {
+      const kwh = parseNum(q('kwh').value);
+      q('importe').value = kwh > 0 ? (Math.round(kwh * conf.precioCasa * 100) / 100).toFixed(2).replace('.', ',') : '';
+      autoPuesto = kwh > 0;
+    } else if (autoPuesto) {
+      q('importe').value = '';
+      autoPuesto = false;
+    }
+  };
+  const odoInfo = () => {
+    const prev = lecturaAnterior(q('fecha').value || tmp.fecha, tmp.id);
+    const odo = leerOdo();
+    let t = prev ? `Última lectura: ${kmTxt(prev.odo)} km (${L.fechaCorta(prev.fecha)}).` : 'Lo que marca el coche al cargar.';
+    if (prev && odo > prev.odo) t += ` Desde entonces: ${kmTxt(odo - prev.odo)} km.`;
+    q('odoInfo').textContent = t;
+  };
+  const sugerir = () => {
+    const t = normTxt(q('empresa').value);
+    const vistas = new Map();
+    for (const c of S.cargas.slice().sort(ordenCarga).reverse()) {
+      if (!c.empresa || c.id === tmp.id) continue;
+      const k = normTxt(c.empresa);
+      if (!vistas.has(k)) vistas.set(k, c);
+    }
+    const lista = [...vistas.values()]
+      .sort((a, b) => (b.tipo === tmp.tipo) - (a.tipo === tmp.tipo))
+      .filter((c) => normTxt(c.empresa) !== t && t.split(' ').every((x) => normTxt(c.empresa).includes(x)))
+      .slice(0, 5);
+    q('sugs').innerHTML = lista.length ? `<div class="pills">${lista.map((c) => `<button type="button" class="pill" data-s="sug">${esc(c.empresa)}</button>`).join('')}</div>` : '';
+  };
+  q('kwh').addEventListener('input', () => { autoImporte(); precioInfo(); });
+  q('importe').addEventListener('input', () => { importeAuto = false; autoPuesto = false; precioInfo(); });
+  q('odo').addEventListener('input', () => { confirmar = ''; err(''); odoInfo(); });
+  q('fecha').addEventListener('change', odoInfo);
+  q('empresa').addEventListener('input', sugerir);
+  autoImporte(); precioInfo(); odoInfo(); sugerir();
+
+  panel.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.tagName === 'INPUT') return;
+    const s = b.dataset.s;
+    if (s === 'x' || s === 'cancelar') return cancelarSheet();
+    if (s === 'tipo') {
+      tmp.tipo = b.dataset.v;
+      panel.querySelectorAll('[data-s="tipo"]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      autoImporte(); precioInfo(); sugerir();
+      return;
+    }
+    if (s === 'sug') { q('empresa').value = b.textContent; sugerir(); return; }
+    if (s === 'del') {
+      if (!confirm('¿Eliminar esta carga?')) return;
+      S.cargas = S.cargas.filter((c) => c.id !== c0.id);
+      await cerrarSheet();
+      commit();
+      toast('Carga eliminada');
+      return;
+    }
+    if (s !== 'ok') return;
+    const fecha = q('fecha').value || tmp.fecha;
+    const kwh = parseNum(q('kwh').value);
+    if (!(kwh > 0)) return err('Pon los kWh cargados.');
+    const imp = parseNum(q('importe').value);
+    if (imp == null || Number.isNaN(imp) || imp < 0) return err('Pon lo que costó la carga (0 si fue gratis).');
+    const odo = leerOdo();
+    if (odo != null && !(odo >= 0)) return err('El cuentakilómetros no es un número válido.');
+    if (odo == null && confirmar !== 'sinodo') {
+      confirmar = 'sinodo';
+      return err('Sin el cuentakilómetros esta carga cuenta para lo pagado, pero no para saber los km. Pulsa Guardar otra vez para guardarla así.');
+    }
+    const prev = lecturaAnterior(fecha, tmp.id);
+    if (odo != null && prev && odo <= prev.odo && confirmar !== 'odo') {
+      confirmar = 'odo';
+      return err(`El cuentakilómetros es menor que el de la carga del ${L.fechaCorta(prev.fecha)} (${kmTxt(prev.odo)} km). Pulsa Guardar otra vez si es correcto.`);
+    }
+    Object.assign(tmp, { fecha, kwh, importe: imp, odo, empresa: q('empresa').value.trim(), nota: q('nota').value.trim() });
+    if (c0) Object.assign(c0, tmp);
+    else S.cargas.push(tmp);
+    await cerrarSheet();
+    commit();
+    toast('Carga guardada');
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Exportaciones
 // ---------------------------------------------------------------------------
 function filasPeriodo(fechas) {
@@ -1675,26 +2027,70 @@ function filasPeriodo(fechas) {
   return { horas, gastos };
 }
 
+// Colores del Excel: los mismos de la app (tipo de hora) y la cabecera oscura de cada día, como en el PDF
+const XL_COLOR_TIPO = {
+  ordinaria: '1D5FB8', desplazamiento: '0F766E', prolongacion: 'C2410C', extra: 'B91C1C', comida: '6B7280',
+  libranza_prol: '15803D', libranza_extra: '9D174D', vacaciones: '7C3AED', enfermedad: '854D0E', info: '4D7C0F', preventa: '334155',
+};
+const XL_DIA = { fill: '16191D', color: 'FFFFFF', b: true };
+const XL_CABECERA = { fill: 'E5E7EB', b: true };
+
 function exportarExcel() {
   const p = periodo();
   const { horas, gastos } = filasPeriodo(p.fechas);
   const r = resumen(p.fechas);
-  const B = (v) => ({ v, b: true });
-  const hojaHoras = [[B('Fecha'), B('Día'), B('Inicio'), B('Fin'), B('Horas'), B('Horas (decimal)'), B('Acumulado día'), B('Tipo'), B('Compensación'), B('Aviso'), B('Descripción aviso'), B('Obra'), B('Comentario')]];
+  const fs = fset();
+  const B = (v) => ({ v, ...XL_CABECERA });
+
+  // Hoja Horas: una fila oscura con el resumen de cada día y, debajo, sus tramos
+  const colsH = ['Fecha', 'Día', 'Inicio', 'Fin', 'Horas', 'Horas (decimal)', 'Acumulado día', 'Tipo', 'Compensación', 'Caso', 'Descripción caso', 'Obra', 'Comentario'];
+  const hojaHoras = [colsH.map(B)];
+  const mergesH = [], altosH = {};
+  let diaActual = null;
   for (const { f, s, acum, num, desc, obra } of horas) {
+    if (f !== diaActual) {
+      diaActual = f;
+      const d = calcDia(f);
+      const t = L.totales(d.segs.filter((x) => !x.abierto));
+      const partes = [L.fechaLarga(f, true), `Computable ${L.fmtHM(t.computable)}`, `Jornada ${L.fmtHM(t.jornada)} de ${L.fmtHM(d.objetivo)}`];
+      if (t.prol) partes.push(`Prolongación ${L.fmtHM(t.prol)}`);
+      if (t.extra) partes.push(`Extra ${L.fmtHM(t.extra)}`);
+      if (fs.has(f)) partes.push('Festivo');
+      altosH[hojaHoras.length] = 20;
+      mergesH.push([hojaHoras.length, 0, colsH.length - 1]);
+      hojaHoras.push(colsH.map((_, i) => ({ v: i === 0 ? partes.join('  ·  ') : '', ...XL_DIA })));
+    }
     const m = s.fin - s.ini;
-    hojaHoras.push([fechaES(f), L.nombreDia(f), L.fmtHora(s.ini), L.fmtHora(s.fin), L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }, L.fmtHM(acum), L.TIPO[s.tipo].label, s.tipo === 'extra' ? L.COMP[s.comp] : '', num, desc, obra, s.comentario || '']);
+    hojaHoras.push([fechaES(f), L.nombreDia(f), L.fmtHora(s.ini), L.fmtHora(s.fin), L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }, L.fmtHM(acum),
+      { v: L.TIPO[s.tipo].label, fill: XL_COLOR_TIPO[s.tipo] || '6B7280', color: 'FFFFFF', b: true },
+      s.tipo === 'extra' ? L.COMP[s.comp] : '', num, desc, obra, s.comentario || '']);
   }
-  const hojaGastos = [[B('Fecha'), B('Aviso'), B('Descripción aviso'), B('Obra'), B('Concepto'), B('Km'), B('Importe (€)'), B('Detalle'), B('Tickets')]];
-  for (const g of gastos) hojaGastos.push([fechaES(g.f), g.num, g.desc, g.obra, g.concepto, g.km ?? '', g.importe != null ? { v: g.importe, n: 'dec' } : '', g.detalle, g.tickets || '']);
+
+  // Hoja Gastos: también separada por días (con los km del día; los euros no se suman)
+  const colsG = ['Fecha', 'Caso', 'Descripción caso', 'Obra', 'Concepto', 'Km', 'Importe (€)', 'Detalle', 'Tickets'];
+  const hojaGastos = [colsG.map(B)];
+  const mergesG = [], altosG = {};
+  const porFecha = [...gastos].sort((x, y) => (x.f < y.f ? -1 : x.f > y.f ? 1 : 0));
+  diaActual = null;
+  for (const g of porFecha) {
+    if (g.f !== diaActual) {
+      diaActual = g.f;
+      const km = porFecha.filter((x) => x.f === g.f && x.km != null).reduce((sum, x) => sum + (x.km || 0), 0);
+      altosG[hojaGastos.length] = 20;
+      mergesG.push([hojaGastos.length, 0, colsG.length - 1]);
+      hojaGastos.push(colsG.map((_, i) => ({ v: i === 0 ? L.fechaLarga(g.f, true) + (km ? `  ·  ${numES(km)} km` : '') : '', ...XL_DIA })));
+    }
+    hojaGastos.push([fechaES(g.f), g.num, g.desc, g.obra, g.concepto, g.km ?? '', g.importe != null ? { v: g.importe, n: 'dec' } : '', g.detalle, g.tickets || '']);
+  }
+
   const hojaRes = [[B('Concepto'), B('Horas'), B('Horas (decimal)')]];
-  const lineaRes = (l, m) => hojaRes.push([l, L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }]);
+  const lineaRes = (l, m, tipo) => hojaRes.push([tipo ? { v: l, fill: XL_COLOR_TIPO[tipo], color: 'FFFFFF', b: true } : l, L.fmtHM(m), { v: Math.round((m / 60) * 100) / 100, n: 'dec' }]);
   lineaRes('Jornada objetivo', r.objetivo);
   lineaRes('Jornada hecha', r.jornada);
-  for (const t of L.TIPOS) if (r.porTipo[t.id]) lineaRes(t.label, r.porTipo[t.id]);
+  for (const t of L.TIPOS) if (r.porTipo[t.id]) lineaRes(t.label, r.porTipo[t.id], t.id);
   const bytes = xlsxBytes([
-    { name: 'Horas', rows: hojaHoras, widths: [11, 6, 8, 8, 8, 9, 10, 22, 14, 15, 26, 32, 30] },
-    { name: 'Gastos', rows: hojaGastos, widths: [11, 15, 26, 32, 18, 8, 11, 30, 8] },
+    { name: 'Horas', rows: hojaHoras, widths: [11, 6, 8, 8, 8, 9, 10, 22, 14, 15, 26, 32, 30], merges: mergesH, heights: altosH },
+    { name: 'Gastos', rows: hojaGastos, widths: [11, 15, 26, 32, 18, 8, 11, 30, 8], merges: mergesG, heights: altosG },
     { name: 'Resumen', rows: hojaRes, widths: [26, 10, 14] },
   ]);
   descargar(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `horas-${p.archivo}.xlsx`);
@@ -1709,11 +2105,11 @@ function imprimir() {
   el.innerHTML = `<h1>Control horario · ${esc(p.titulo)} ${esc(p.sub)}</h1>
     <p>Jornada: ${L.fmtHM(r.jornada)} de ${L.fmtHM(r.objetivo)} · Prolongación: ${L.fmtHM(r.prol)} · Extra: ${L.fmtHM(r.extra)}</p>
     <h2>Horas</h2>
-    <table><thead><tr><th>Fecha</th><th>Inicio</th><th>Fin</th><th class="num">Horas</th><th class="num">Acum.</th><th>Tipo</th><th>Aviso</th><th>Obra</th></tr></thead><tbody>
+    <table><thead><tr><th>Fecha</th><th>Inicio</th><th>Fin</th><th class="num">Horas</th><th class="num">Acum.</th><th>Tipo</th><th>Caso</th><th>Obra</th></tr></thead><tbody>
     ${horas.map(({ f, s, acum, primero, num, desc, obra }) => `<tr class="${primero ? 'nuevo-dia' : ''}"><td>${primero ? L.fechaCorta(f) : ''}</td><td>${L.fmtHora(s.ini)}</td><td>${L.fmtHora(s.fin)}</td><td class="num">${L.fmtHM(s.fin - s.ini)}</td><td class="num">${s.tipo === 'comida' ? '' : L.fmtHM(acum)}</td><td><span class="pt t-${s.tipo}">${esc(L.TIPO[s.tipo].label)}</span>${s.tipo === 'extra' ? ' (' + L.COMP[s.comp].toLowerCase() + ')' : ''}</td><td>${esc(num)}</td><td>${esc([desc, obra].filter(Boolean).join(' · '))}</td></tr>`).join('') || '<tr><td colspan="8">Sin horas</td></tr>'}
     </tbody></table>
     <h2>Gastos</h2>
-    <table><thead><tr><th>Fecha</th><th>Aviso</th><th>Obra</th><th>Concepto</th><th class="num">Km</th><th class="num">Importe</th><th>Detalle</th></tr></thead><tbody>
+    <table><thead><tr><th>Fecha</th><th>Caso</th><th>Obra</th><th>Concepto</th><th class="num">Km</th><th class="num">Importe</th><th>Detalle</th></tr></thead><tbody>
     ${gastos.map((g) => `<tr><td>${L.fechaCorta(g.f)}</td><td>${esc(g.num)}</td><td>${esc([g.desc, g.obra].filter(Boolean).join(' · '))}</td><td>${esc(g.concepto)}</td><td class="num">${g.km != null ? numES(g.km) : ''}</td><td class="num">${g.importe != null ? euros(g.importe) : ''}</td><td>${esc(g.detalle)}</td></tr>`).join('') || '<tr><td colspan="7">Sin gastos</td></tr>'}
     </tbody></table>`;
   setTimeout(() => window.print(), 50);
@@ -1731,7 +2127,7 @@ async function exportarTickets() {
       if (!blob) continue;
       n++;
       const ext = blob.type === 'application/pdf' ? 'pdf' : blob.type === 'image/png' ? 'png' : 'jpg';
-      const nombre = `${g.fecha}_${(i?.num || (i ? 'sin-numero' : 'sin-aviso'))}_${g.cat}${n > 1 ? '_' + n : ''}.${ext}`.replace(/[^\w.\-áéíóúñÁÉÍÓÚÑ]/g, '_');
+      const nombre = `${g.fecha}_${(i?.num || (i ? 'sin-numero' : 'sin-caso'))}_${g.cat}${n > 1 ? '_' + n : ''}.${ext}`.replace(/[^\w.\-áéíóúñÁÉÍÓÚÑ]/g, '_');
       files.push({ name: nombre, data: new Uint8Array(await blob.arrayBuffer()) });
     }
   }
@@ -1785,9 +2181,7 @@ async function restaurar(file) {
   toast('Copia restaurada');
 }
 async function cargarDesdeObjeto() {
-  const base = estadoVacio();
-  for (const k of Object.keys(base)) if (S[k] == null) S[k] = base[k];
-  S.ajustes = { ...base.ajustes, ...S.ajustes };
+  completarEstado();
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,10 +2194,12 @@ function render() {
   let tab = p;
   switch (p) {
     case 'dia': html = vDia(arg); tab = 'hoy'; break;
+    case 'casos': html = vCasos(); break;
     case 'gastos': html = vGastos(arg); break;
     case 'resumen': html = vResumen(); break;
     case 'bolsas': html = vBolsas(); break;
     case 'ajustes': html = vAjustes(); tab = ''; break;
+    case 'coche': html = vCoche(); tab = 'hoy'; break;
     default: html = vHoy(); tab = 'hoy';
   }
   app.innerHTML = html;
@@ -1831,6 +2227,13 @@ document.addEventListener('click', (e) => {
     ir(a.getAttribute('href'), { pestana: !!a.closest('nav.tabs') });
   }
 });
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'casosQ') {
+    CS.q = e.target.value;
+    const l = document.getElementById('casosLista');
+    if (l) l.innerHTML = listaCasos();
+  }
+});
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-campo]');
   if (!el) {
@@ -1839,6 +2242,22 @@ document.addEventListener('change', (e) => {
       document.querySelectorAll('[data-mes]').forEach((s) => { s.textContent = cap(L.mesLargo(meses[+s.dataset.mes])); });
     }
     return;
+  }
+  if (el.dataset.campo === 'precioCasa' || el.dataset.campo === 'pagoKm') {
+    const v = parseNum(el.value);
+    if (Number.isNaN(v) || (v != null && v < 0)) { toast('No es un número válido'); return; }
+    S.ajustes.coche[el.dataset.campo] = v;
+    guardar();
+    toast('Guardado');
+  }
+  if (el.dataset.campo === 'recMin') {
+    const m = L.parseDuracion(el.value);
+    const c = S.ajustes.recordatorios[el.dataset.k];
+    if (m == null || m <= 0) { toast('Pon un tiempo en formato h:mm (por ejemplo 2:00)'); el.value = L.fmtHM(c.min); return; }
+    c.min = m;
+    el.value = L.fmtHM(m);
+    guardar();
+    toast('Guardado');
   }
   if (el.dataset.campo === 'comentarioDia') {
     dia(el.dataset.f).comentario = el.value;

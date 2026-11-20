@@ -413,3 +413,108 @@ export function libroExtras(inicial, extras, libranzas, hoy) {
 export function avisoValido(n) {
   return /^\d{9}-\d{1,3}$/.test((n || '').trim());
 }
+
+// ---------- Recordatorios de tramos abiertos ----------
+
+/** Lo que se recuerda por defecto: comida 2:00, desplazamiento 3:00, trabajo sin terminar 8:00. */
+export const RECORDATORIOS = [
+  { id: 'comida', label: 'Comida', min: 120, texto: 'La comida sigue contando' },
+  { id: 'desplazamiento', label: 'Desplazamiento', min: 180, texto: 'El desplazamiento sigue contando' },
+  { id: 'trabajo', label: 'Trabajo sin terminar', min: 480, texto: 'El trabajo sigue contando' },
+];
+export const recordatoriosDefecto = () => Object.fromEntries(RECORDATORIOS.map((r) => [r.id, { on: true, min: r.min }]));
+
+/**
+ * ¿Hay que recordar algo de este tramo? Solo si sigue abierto, es de hoy y lleva
+ * abierto al menos el tiempo configurado para su clase. Devuelve { id, min } o null.
+ */
+export function recordatorio(tramo, { hoy, ahora, conf }) {
+  if (!tramo || tramo.fin != null || tramo.fecha !== hoy) return null;
+  const c = conf?.[tramo.clase];
+  if (!c || !c.on || !(c.min > 0)) return null;
+  const min = ahora - tramo.ini;
+  return min >= c.min ? { id: tramo.clase, min } : null;
+}
+
+// ---------- Coche eléctrico: coste por kilómetro ----------
+
+export const TIPOS_CARGA = [
+  { id: 'casa', label: 'Casa' },
+  { id: 'normal', label: 'Pública normal' },
+  { id: 'rapida', label: 'Pública rápida' },
+];
+export const TIPO_CARGA = Object.fromEntries(TIPOS_CARGA.map((t) => [t.id, t]));
+
+const ordenCargas = (a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : (a.odo ?? Infinity) - (b.odo ?? Infinity));
+
+/**
+ * Tramos de uso entre lecturas del cuentakilómetros.
+ * La energía de una carga se gasta en los km que vienen después, así que cada tramo
+ * (de una lectura a la siguiente) lleva los km recorridos y lo cargado desde la lectura
+ * anterior (incluida) hasta esta (sin incluir). Una lectura menor que la anterior se
+ * toma como si no tuviera lectura. Los tramos se fechan con la lectura final.
+ */
+export function usosCoche(cargas) {
+  const cs = cargas.slice().sort(ordenCargas);
+  const usos = [];
+  let prev = null;
+  let acc = null;
+  for (const c of cs) {
+    const lectura = c.odo != null && isFinite(c.odo) && (prev == null || c.odo > prev.odo);
+    if (lectura) {
+      if (prev) usos.push({ id: c.id, fecha: c.fecha, desde: prev.fecha, km: c.odo - prev.odo, kwh: acc.kwh, importe: acc.importe });
+      prev = c;
+      acc = { kwh: 0, importe: 0 };
+    }
+    if (acc) { acc.kwh += c.kwh || 0; acc.importe += c.importe || 0; }
+  }
+  return usos;
+}
+
+/**
+ * Cuentas del coche en un periodo (desde/hasta 'AAAA-MM-DD', null = sin límite).
+ * cargas: [{fecha, tipo, kwh, importe, odo}]; kmTrabajo: [{fecha, km}] (los km de los casos).
+ */
+export function cuentasCoche(cargas, kmTrabajo, { desde = null, hasta = null } = {}) {
+  const dentro = (f) => (!desde || f >= desde) && (!hasta || f <= hasta);
+  const usos = usosCoche(cargas);
+  const lecturas = cargas.filter((c) => c.odo != null).map((c) => c.fecha).sort();
+  const primeraLectura = lecturas[0] || null;
+  const ultimaLectura = usos.length ? usos[usos.length - 1].fecha : primeraLectura;
+  const enPeriodo = cargas.filter((c) => dentro(c.fecha));
+  const r = { cargas: enPeriodo.length, pagado: 0, kwh: 0, km: 0, kwhUso: 0, costeUso: 0, porTipo: {} };
+  for (const c of enPeriodo) {
+    r.pagado += c.importe || 0;
+    r.kwh += c.kwh || 0;
+    const t = (r.porTipo[c.tipo] ||= { kwh: 0, importe: 0, cargas: 0 });
+    t.kwh += c.kwh || 0;
+    t.importe += c.importe || 0;
+    t.cargas++;
+  }
+  for (const u of usos) {
+    if (!dentro(u.fecha)) continue;
+    r.km += u.km;
+    r.kwhUso += u.kwh;
+    r.costeUso += u.importe;
+  }
+  r.eurKm = r.km > 0 ? r.costeUso / r.km : null;
+  r.consumo = r.km > 0 ? (r.kwhUso / r.km) * 100 : null; // kWh cada 100 km
+  // Consumo de referencia para «si cargaras siempre aquí»: el del periodo o, si no hay, el de siempre
+  const todo = usos.reduce((a, u) => ({ km: a.km + u.km, kwh: a.kwh + u.kwh }), { km: 0, kwh: 0 });
+  const consumoRef = r.consumo ?? (todo.km > 0 ? (todo.kwh / todo.km) * 100 : null);
+  for (const t of Object.values(r.porTipo)) {
+    t.eurKwh = t.kwh > 0 ? t.importe / t.kwh : null;
+    t.pct = r.kwh > 0 ? t.kwh / r.kwh : 0;
+    t.eur100 = t.eurKwh != null && consumoRef != null ? t.eurKwh * consumoRef : null;
+  }
+  // Km de trabajo: los de los casos, solo entre la primera y la última lectura del cuentakilómetros
+  // (los de después todavía no están en ninguna lectura)
+  r.kmTrabajo = primeraLectura
+    ? kmTrabajo.filter((k) => dentro(k.fecha) && k.fecha >= primeraLectura && k.fecha <= ultimaLectura).reduce((s, k) => s + (k.km || 0), 0)
+    : 0;
+  r.kmPersonal = Math.max(0, r.km - r.kmTrabajo);
+  r.trabajoSupera = r.kmTrabajo > r.km;
+  r.primeraLectura = primeraLectura;
+  r.ultimaLectura = ultimaLectura;
+  return r;
+}

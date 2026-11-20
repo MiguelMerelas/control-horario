@@ -227,8 +227,29 @@ button.chip svg { width: 14px; height: 14px; }
 .field .err { font-weight: 600; color: var(--danger); font-size: 12px; }
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
 
+/* Casos (v1.3) */
+.row.btnrow { width: 100%; background: none; border: none; border-bottom: 1px solid var(--line-soft); text-align: left; font: inherit; color: inherit; }
+.row.btnrow:last-child { border-bottom: none; }
+.row.btnrow svg { flex: none; color: var(--muted); }
+.pill .cnt { font-family: var(--mono); font-weight: 500; opacity: .75; margin-left: 2px; }
+
+/* Recordatorios (v1.3) */
+.warn.recordatorio { display: flex; align-items: center; gap: 8px; padding-right: 4px; }
+.warn.recordatorio .grow { flex: 1; min-width: 0; }
+.warn.recordatorio .iconbtn { width: 40px; height: 40px; }
+.recrow { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.recrow .grow { flex: 1; min-width: 0; }
+.recrow .t1 { font-size: 14px; font-weight: 600; }
+.recrow .input { width: 76px; flex: none; text-align: center; padding: 0 6px; }
+.recrow .toggle { width: 96px; flex: none; }
+
+/* Coche eléctrico (v1.3) */
+.help-l { font-size: 12px; color: var(--ok); font-weight: 600; margin-top: -6px; }
+.help-l:empty { display: none; }
+#sheet .segm button { padding: 0 4px; }
+
 /* Barra de navegación */
-nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); z-index: 10; }
+nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 6px 4px calc(8px + env(safe-area-inset-bottom)); z-index: 10; }
 nav.tabs a { min-height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; text-decoration: none; color: var(--muted); font-size: 12px; font-weight: 500; }
 nav.tabs a[aria-current="page"] { color: var(--ink); font-weight: 700; }
 nav.tabs svg { width: 22px; height: 22px; }

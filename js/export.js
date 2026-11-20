@@ -84,10 +84,52 @@ function colRef(i) {
 }
 
 /**
- * sheets: [{ name, rows: [[cell]], widths?: [n] }]
- * cell: string | number | null | { v, b?: true, n?: 'dec' }
+ * sheets: [{ name, rows: [[cell]], widths?: [n], merges?: [[fila, colIni, colFin]], heights?: { fila: alto } }]
+ * cell: string | number | null | { v, b?: true, n?: 'dec', fill?: 'RRGGBB', color?: 'RRGGBB' }
+ * (filas y columnas empiezan en 0). Una celda vacía con estilo se escribe igualmente
+ * para que el color de una fila combinada llegue hasta el final.
  */
 export function xlsxBytes(sheets) {
+  // Estilos: se registran según se usan (fuente + relleno + formato de número)
+  const fonts = ['<font><sz val="11"/><name val="Calibri"/></font>'];
+  const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>'];
+  const xfs = ['<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'];
+  const idx = { font: new Map(), fill: new Map(), xf: new Map() };
+  const registrar = (mapa, lista, clave, xmlTxt) => {
+    if (!mapa.has(clave)) { mapa.set(clave, lista.length); lista.push(xmlTxt); }
+    return mapa.get(clave);
+  };
+  const estilo = (o) => {
+    if (!o.b && !o.n && !o.fill && !o.color) return 0;
+    const color = o.color ? `<color rgb="FF${o.color}"/>` : '';
+    const fontId = o.b || o.color ? registrar(idx.font, fonts, `${!!o.b}|${o.color || ''}`, `<font>${o.b ? '<b/>' : ''}<sz val="11"/>${color}<name val="Calibri"/></font>`) : 0;
+    const fillId = o.fill ? registrar(idx.fill, fills, o.fill, `<fill><patternFill patternType="solid"><fgColor rgb="FF${o.fill}"/><bgColor indexed="64"/></patternFill></fill>`) : 0;
+    const numFmtId = o.n === 'dec' ? 2 : 0;
+    const clave = `${fontId}|${fillId}|${numFmtId}`;
+    return registrar(idx.xf, xfs, clave, `<xf numFmtId="${numFmtId}" fontId="${fontId}" fillId="${fillId}" borderId="0" xfId="0"${fontId ? ' applyFont="1"' : ''}${fillId ? ' applyFill="1"' : ''}${numFmtId ? ' applyNumberFormat="1"' : ''}/>`);
+  };
+
+  const hojasXml = sheets.map((s) => {
+    const filas = s.rows.map((fila, r) => {
+      const celdas = fila.map((c, ci) => {
+        if (c == null) return '';
+        const o = typeof c === 'object' ? c : { v: c };
+        const st = estilo(o);
+        const ref = colRef(ci) + (r + 1);
+        const sAttr = st ? ` s="${st}"` : '';
+        if (o.v == null || o.v === '') return st ? `<c r="${ref}"${sAttr}/>` : '';
+        if (typeof o.v === 'number' && isFinite(o.v)) return `<c r="${ref}"${sAttr}><v>${o.v}</v></c>`;
+        return `<c r="${ref}" t="inlineStr"${sAttr}><is><t xml:space="preserve">${xml(o.v)}</t></is></c>`;
+      }).join('');
+      const ht = s.heights?.[r];
+      return `<row r="${r + 1}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>${celdas}</row>`;
+    }).join('');
+    const cols = s.widths ? `<cols>${s.widths.map((w, ci) => `<col min="${ci + 1}" max="${ci + 1}" width="${w}" customWidth="1"/>`).join('')}</cols>` : '';
+    const vista = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>';
+    const merges = s.merges?.length ? `<mergeCells count="${s.merges.length}">${s.merges.map(([r, a, b]) => `<mergeCell ref="${colRef(a)}${r + 1}:${colRef(b)}${r + 1}"/>`).join('')}</mergeCells>` : '';
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${vista}${cols}<sheetData>${filas}</sheetData>${merges}</worksheet>`;
+  });
+
   const files = [];
   const ct = sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('');
   files.push({ name: '[Content_Types].xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${ct}</Types>` });
@@ -96,22 +138,7 @@ export function xlsxBytes(sheets) {
   files.push({ name: 'xl/workbook.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${hojas}</sheets></workbook>` });
   const rels = sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('');
   files.push({ name: 'xl/_rels/workbook.xml.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` });
-  files.push({ name: 'xl/styles.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>' });
-  sheets.forEach((s, i) => {
-    const filas = s.rows.map((fila, r) => {
-      const celdas = fila.map((c, ci) => {
-        if (c == null || c === '') return '';
-        const ref = colRef(ci) + (r + 1);
-        const o = typeof c === 'object' ? c : { v: c };
-        const st = o.b ? ' s="1"' : o.n === 'dec' ? ' s="2"' : '';
-        if (typeof o.v === 'number' && isFinite(o.v)) return `<c r="${ref}"${st}><v>${o.v}</v></c>`;
-        return `<c r="${ref}" t="inlineStr"${st}><is><t xml:space="preserve">${xml(o.v)}</t></is></c>`;
-      }).join('');
-      return `<row r="${r + 1}">${celdas}</row>`;
-    }).join('');
-    const cols = s.widths ? `<cols>${s.widths.map((w, ci) => `<col min="${ci + 1}" max="${ci + 1}" width="${w}" customWidth="1"/>`).join('')}</cols>` : '';
-    const vista = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>';
-    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${vista}${cols}<sheetData>${filas}</sheetData></worksheet>` });
-  });
+  files.push({ name: 'xl/styles.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="${fonts.length}">${fonts.join('')}</fonts><fills count="${fills.length}">${fills.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${xfs.length}">${xfs.join('')}</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>` });
+  hojasXml.forEach((data, i) => files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data }));
   return zipBytes(files);
 }
